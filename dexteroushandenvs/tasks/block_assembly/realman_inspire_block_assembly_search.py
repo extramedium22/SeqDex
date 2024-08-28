@@ -194,11 +194,11 @@ class InspireBlockAssemblySearch(BaseTask):
 
         if self.viewer != None:
             # forward
-            # cam_pos = gymapi.Vec3(1, -0.1, 1.5)
-            # cam_target = gymapi.Vec3(-0.7, -0.1, 0.5)
+            cam_pos = gymapi.Vec3(1, -0.1, 1.5)
+            cam_target = gymapi.Vec3(-0.7, -0.1, 0.5)
             # left
-            cam_pos = gymapi.Vec3(-0.26, -1.5, 2)
-            cam_target = gymapi.Vec3(-0.26,1 , 0.5)
+            # cam_pos = gymapi.Vec3(-0.26, -1.5, 2)
+            # cam_target = gymapi.Vec3(-0.26,1 , 0.5)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
         # get gym GPU state tensors
@@ -215,7 +215,8 @@ class InspireBlockAssemblySearch(BaseTask):
 
         # create some wrapper tensors for different slices
         self.arm_hand_default_dof_pos = torch.zeros(self.num_arm_hand_dofs, dtype=torch.float, device=self.device)   
-        self.arm_hand_default_dof_pos[:7] = torch.tensor([3.14, 0.6, 0, 0.6, 0., 0.59, -1.571], dtype=torch.float, device=self.device)        
+        
+        self.arm_hand_default_dof_pos[:7] = torch.tensor([0.0, 0.6, 0, 0.6, 0., 0.59, -1.571], dtype=torch.float, device=self.device)     
 
         self.arm_hand_default_dof_pos[7:] = to_torch([0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785], dtype=torch.float, device=self.device)
 
@@ -230,7 +231,7 @@ class InspireBlockAssemblySearch(BaseTask):
         #     [0.0, -0.49826458111314524, -0.01990020486871322, -2.4732269941140346, -0.01307073642274261, 2.00396583422025, 1.5480939705504309,
         #      0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785], dtype=torch.float, device=self.device)
         self.arm_hand_prepare_dof_pos = to_torch(
-            [3.14, 0.6, 0, 0.6, 0., 0.59, -1.571,
+            [0.0, 0.6, 0, 0.6, 0., 0.59, -1.571,
              0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785], dtype=torch.float, device=self.device)
         self.arm_hand_prepare_dof_pos_list.append(self.arm_hand_prepare_dof_pos)
         self.end_effector_rot_list.append(to_torch([0, 0.707, 0, 0.707], device=self.device))
@@ -544,9 +545,9 @@ class InspireBlockAssemblySearch(BaseTask):
 
         # Put objects in the scene.
         arm_hand_start_pose = gymapi.Transform()
-        arm_hand_start_pose.p = gymapi.Vec3(-0.25, 0.0, 0.6)
         # arm_hand_start_pose.p = gymapi.Vec3(-0.35, 0.0, 0.6)
-        arm_hand_start_pose.r = gymapi.Quat().from_euler_zyx(0, 0, 0.0)
+        arm_hand_start_pose.p = gymapi.Vec3(-0.3, 0.0, 0.6)
+        arm_hand_start_pose.r = gymapi.Quat(0, 0, 1, 0)
 
         # create table asset
         table_dims = gymapi.Vec3(1.5, 1.0, 0.6)
@@ -794,7 +795,7 @@ class InspireBlockAssemblySearch(BaseTask):
                 self.gym.begin_aggregate(env_ptr, max_agg_bodies, max_agg_shapes, True)
 
             # add hand - collision filter = -1 to use asset collision filters set in mjcf loader
-            arm_hand_actor = self.gym.create_actor(env_ptr, arm_hand_asset, arm_hand_start_pose, "hand", i+self.num_envs, 0, 0)
+            arm_hand_actor = self.gym.create_actor(env_ptr, arm_hand_asset, arm_hand_start_pose, "hand", i, 0, 0)
             self.hand_start_states.append([arm_hand_start_pose.p.x,
                                            arm_hand_start_pose.p.y,
                                            arm_hand_start_pose.p.z,
@@ -962,9 +963,10 @@ class InspireBlockAssemblySearch(BaseTask):
         self.lego_segmentation_indices = to_torch(self.lego_segmentation_indices, dtype=torch.long, device=self.device)
 
     def compute_reward(self, actions):
+        fingers_pos = [self.arm_hand_ff_pos, self.arm_hand_rf_pos, self.arm_hand_mf_pos, self.arm_hand_th_pos, self.arm_hand_pf_pos]
         self.rew_buf[:], self.reset_buf[:], self.reset_goal_buf[:], self.progress_buf[:], self.successes[:], self.consecutive_successes[:] = compute_hand_reward(
             torch.tensor(self.spin_coef).to(self.device), self.rew_buf, self.reset_buf, self.reset_goal_buf, self.progress_buf, self.successes, self.consecutive_successes, self.hand_reset_step, self.contacts, self.palm_contacts_z, self.segmentation_object_point_num.squeeze(-1), self.segmentation_target_init_pos,
-            self.max_episode_length, self.object_pos, self.object_rot, self.object_angvel, self.goal_pos, self.goal_rot, self.segmentation_target_pos, self.hand_base_pos, self.emergence_reward, self.arm_hand_ff_pos, self.arm_hand_rf_pos, self.arm_hand_mf_pos, self.arm_hand_th_pos, self.heap_movement_penalty,
+            self.max_episode_length, self.object_pos, self.object_rot, self.object_angvel, self.goal_pos, self.goal_rot, self.segmentation_target_pos, self.hand_base_pos, self.emergence_reward, fingers_pos, self.heap_movement_penalty,
             self.dist_reward_scale, self.rot_reward_scale, self.rot_eps, self.actions, self.action_penalty_scale,
             self.success_tolerance, self.reach_goal_bonus, self.fall_dist, self.fall_penalty, self.rotation_id,
             self.max_consecutive_successes, self.av_factor, (self.object_type == "pen"), self.init_heap_movement_penalty, self.tvalue,
@@ -1040,7 +1042,7 @@ class InspireBlockAssemblySearch(BaseTask):
 
             self.compute_emergence_reward(self.camera_tensors, self.camera_seg_tensors, segmentation_id_list=self.segmentation_id_list)
             self.all_lego_brick_pos = self.root_state_tensor[self.lego_indices[:].view(-1), 0:3].clone().view(self.num_envs, -1, 3)
-            self.compute_heap_movement_penalty(self.all_lego_brick_pos)
+            # self.compute_heap_movement_penalty(self.all_lego_brick_pos)
 
             # for i in range(1):
             # camera_rgba_image = self.camera_rgb_visulization(self.camera_tensors, env_id=0, is_depth_image=False)
@@ -1641,6 +1643,10 @@ class InspireBlockAssemblySearch(BaseTask):
         # self.pos_err_offset  = torch.Tensor([0., 0., 0.0]).to(self.device)
         # point = self.rigid_body_states[:, self.hand_base_rigid_body_index, 0:3] - self.pos_err_offset 
         # point = point.cpu().numpy()[0]
+        
+        # Box 28,29,30,31,32
+        # point = np.array([-0.045, 0.19,1])
+        # point = self.rigid_body_states[0, 32, 0:3]
         # gymutil.draw_line(gymapi.Vec3(*point), gymapi.Vec3(point[0],point[1],point[2]+1), gymapi.Vec3(0, 0, 1), self.gym, self.viewer, self.envs[0])
         # gymutil.draw_line(gymapi.Vec3(*point), gymapi.Vec3(point[0],point[1]+1,point[2]), gymapi.Vec3(0, 1, 0), self.gym, self.viewer, self.envs[0])
         # gymutil.draw_line(gymapi.Vec3(*point), gymapi.Vec3(point[0]+1,point[1],point[2]), gymapi.Vec3(1, 0, 0), self.gym, self.viewer, self.envs[0])
@@ -1655,14 +1661,14 @@ class InspireBlockAssemblySearch(BaseTask):
         self.actions = actions.clone().to(self.device)
 
         RL_CONTROL = False
-        self.max_episode_length = 100
+        # self.max_episode_length = 100
         # ============ control inspire hand ============ 
         self.cur_targets[:, self.actuated_dof_indices] = scale(
             self.actions[:, self.num_realman_dofs:self.num_arm_hand_dofs],
             self.arm_hand_dof_lower_limits[self.actuated_dof_indices],
             self.arm_hand_dof_upper_limits[self.actuated_dof_indices]
         )
-        # self.cur_targets[:, self.actuated_dof_indices] = self.act_moving_average * self.cur_targets[:,self.actuated_dof_indices] + (1.0 - self.act_moving_average) * self.prev_targets[:, self.actuated_dof_indices]
+        self.cur_targets[:, self.actuated_dof_indices] = self.act_moving_average * self.cur_targets[:,self.actuated_dof_indices] + (1.0 - self.act_moving_average) * self.prev_targets[:, self.actuated_dof_indices]
         self.cur_targets[:, self.actuated_dof_indices] = tensor_clamp(
             self.cur_targets[:, self.actuated_dof_indices],
             self.arm_hand_dof_lower_limits[self.actuated_dof_indices],
@@ -1678,16 +1684,16 @@ class InspireBlockAssemblySearch(BaseTask):
             )
         else:
             # control_ik
+            # point = to_torch([-0.25, 0.19, 0.7], dtype=torch.float, device=self.device)
             pos_err = self.segmentation_target_pos - self.rigid_body_states[:, self.hand_base_rigid_body_index, :3]
-            # pos_err[:, 2] += 0.24
-            pos_err[:, 2] += 0.18
+            pos_err[:, 2] += 0.05
             pos_err[:, 0] -= 0.16
             
             target_rot = to_torch([0.5, -0.5,  0.5, -0.5], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
             rot_err = orientation_error(target_rot, self.rigid_body_states[:, self.hand_base_rigid_body_index, 3:7].clone())
             dpose = torch.cat([pos_err, rot_err], -1).unsqueeze(-1)
             delta = control_ik(self.jacobian_tensor[:, self.hand_base_rigid_body_index - 1, :, :7], self.device, dpose, self.num_envs)
-            self.cur_targets[:, :7] = self.arm_hand_dof_pos[:, :7] + delta[:, :7]
+            self.cur_targets[:, :self.num_realman_dofs] = self.arm_hand_dof_pos[:, :self.num_realman_dofs] + delta[:, :self.num_realman_dofs]
             
         self.cur_targets[:, :] = tensor_clamp(
             self.cur_targets[:, :],
@@ -1696,7 +1702,7 @@ class InspireBlockAssemblySearch(BaseTask):
         )
         
         discard = True
-        if discard:
+        if not discard:
             # Frankie: add offset
             self.pos_err_offset = torch.Tensor([-0.1, -0.18, 0.4]).to(self.device)
             pos_err = self.segmentation_target_pos - self.rigid_body_states[:, self.hand_base_rigid_body_index, 0:3]
@@ -1731,7 +1737,6 @@ class InspireBlockAssemblySearch(BaseTask):
         self.prev_targets[:, :] = self.cur_targets[:, :]
         self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.cur_targets))
         
-
     def post_physics_step(self):
         self.progress_buf += 1
         self.randomize_buf += 1
@@ -1803,14 +1808,15 @@ class InspireBlockAssemblySearch(BaseTask):
 
 def compute_hand_reward(
     spin_coef, rew_buf, reset_buf, reset_goal_buf, progress_buf, successes, consecutive_successes, max_hand_reset_length: int, arm_contacts, palm_contacts_z, segmengtation_object_point_num, segmentation_target_init_pos,
-    max_episode_length: float, object_pos, object_rot, object_angvel, target_pos, target_rot, segmentation_target_pos, hand_base_pos, emergence_reward, arm_hand_ff_pos, arm_hand_rf_pos, arm_hand_mf_pos, arm_hand_th_pos, heap_movement_penalty,
+    max_episode_length: float, object_pos, object_rot, object_angvel, target_pos, target_rot, segmentation_target_pos, hand_base_pos, emergence_reward, fingers_pos, heap_movement_penalty,
     dist_reward_scale: float, rot_reward_scale: float, rot_eps: float,
     actions, action_penalty_scale: float,
     success_tolerance: float, reach_goal_bonus: float, fall_dist: float,
     fall_penalty: float, rotation_id: int, max_consecutive_successes: int, av_factor: float, ignore_z_rot: bool, init_heap_movement_penalty, tvalue
 ):
-    arm_hand_finger_dist = (torch.norm(segmentation_target_pos - arm_hand_ff_pos, p=2, dim=-1) + torch.norm(segmentation_target_pos - arm_hand_mf_pos, p=2, dim=-1)
-                            + torch.norm(segmentation_target_pos - arm_hand_rf_pos, p=2, dim=-1) + torch.norm(segmentation_target_pos - arm_hand_th_pos, p=2, dim=-1))
+    #  Total rewad is: position distance + orientation alignment + action regularization + success bonus + fall penalty
+    # ================= Position distance: (hand, target) distance =================
+    arm_hand_finger_dist = sum([torch.norm(segmentation_target_pos - finger_pos, p=2, dim=-1) for finger_pos in fingers_pos])
     dist_rew = torch.clamp(- 0.2 *arm_hand_finger_dist, None, -0.06)
 
     action_penalty = torch.sum(actions ** 2, dim=-1) * 0.005
@@ -1826,7 +1832,7 @@ def compute_hand_reward(
     heap_movement_penalty = torch.where(progress_buf >= (max_episode_length - 1), torch.clamp(heap_movement_penalty - init_heap_movement_penalty, min=0, max=15), torch.zeros_like(heap_movement_penalty))
 
     emergence_reward *= object_up_reward / 10
-    reward = dist_rew - arm_contacts_penalty + success_bonus - action_penalty + object_up_reward
+    reward = dist_rew - 5*arm_contacts_penalty + success_bonus - action_penalty + object_up_reward
 
     # reward = dist_rew - arm_contacts_penalty + success_bonus - action_penalty + object_up_reward + tvalue
 
@@ -1851,7 +1857,7 @@ def compute_hand_reward(
     finished_cons_successes = torch.sum(successes * resets.float())
 
     cons_successes = torch.where(num_resets > 0, av_factor*finished_cons_successes/num_resets + (1.0 - av_factor)*consecutive_successes, consecutive_successes)
-
+    print("Reward: ", reward[0])
     return reward, resets, reset_goal_buf, progress_buf, successes, cons_successes
 
 
