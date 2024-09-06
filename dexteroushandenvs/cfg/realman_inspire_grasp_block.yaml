@@ -4,7 +4,7 @@ env:
   project: "DexterousHand"
   numEnvs: 1
   envSpacing: 1.25
-  episodeLength: 100
+  episodeLength: 210
   handResetStep: 45
   enableDebugVis: False
   enable_camera_sensors: False
@@ -13,8 +13,8 @@ env:
   stiffnessScale: 1.0
   forceLimitScale: 1.0
   useRelativeControl: False
-  dofSpeedScale: 5.0
-  actionsMovingAverage: 0.6
+  dofSpeedScale: 1.0
+  actionsMovingAverage: 0.8
   controlFrequencyInv: 1 # 60 Hz
 
   startPositionNoise: 0.0
