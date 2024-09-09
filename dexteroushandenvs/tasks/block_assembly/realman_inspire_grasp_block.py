@@ -92,15 +92,12 @@ class InspireGraspBlock(BaseTask):
         
         # arm_hand default dof pos
         self.arm_hand_default_dof_pos = torch.zeros(self.num_arm_hand_dofs, dtype=torch.float, device=self.device)
-        # self.arm_hand_default_dof_pos[:7] = to_torch([-0.4, 0.45, 0.0, 1.78, 0.0, -0.4, -1.571] , dtype=torch.float, device=self.device)     
-        # self.arm_hand_default_dof_pos[7:] = to_torch([0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785], dtype=torch.float, device=self.device)
         self.arm_hand_default_dof_pos[:7] = to_torch([0.0, 0.45, 0.0, 1.78, 0.0, -0.5, -1.571] , dtype=torch.float, device=self.device)     
         self.arm_hand_default_dof_pos[7:] = to_torch([0.0, 0, 0.0, 0.0, -0.0, 0.0, 0.0, -0.0, 0.0, 0.0, -0.0, 0.0], dtype=torch.float, device=self.device)
 
         # arm_hand prepare dof pos
         self.arm_hand_prepare_dof_pos = torch.zeros(self.num_arm_hand_dofs, dtype=torch.float, device=self.device)
-        self.arm_hand_prepare_dof_pos[:7] = to_torch([0.0, 0.45, 0.0, 1.78, 0.0, -0.5, -1.571] , dtype=torch.float, device=self.device)     
-        # self.arm_hand_prepare_dof_pos[7:] = to_torch([0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785, 0.0, -0.174, 0.785], dtype=torch.float, device=self.device)
+        self.arm_hand_prepare_dof_pos[:7] = to_torch([0.0, 0.45, 0.0, 1.78, 0.0, -0.5, -1.571] , dtype=torch.float, device=self.device)
         self.arm_hand_prepare_dof_pos[7:] = to_torch([0.0, 0, 0.0, 0.0, -0.0, 0.0, 0.0, -0.0, 0.0, 0.0, -0.0, 0.0], dtype=torch.float, device=self.device)
 
         # arm_hand dof state
@@ -138,7 +135,7 @@ class InspireGraspBlock(BaseTask):
         print("Contact Tensor Dimension", self.contact_tensor.shape)
         print("hand_base_rigid_body_index: ", self.hand_base_rigid_body_index)
         
-        self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "grasp_reward": 0, "angle_reward": 0}
+        self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, "angle_reward": 0}
         self.enable_wandb = False
         
         self._init_wandb()
@@ -470,211 +467,43 @@ class InspireGraspBlock(BaseTask):
         
         self.obs_buf = self.states_buf
 
-    def compute_reward1(self):
-        # define the reward
-        fingers_pos = [self.finger_thumb_pos, self.finger_index_pos, self.finger_middle_pos]
-        finger_dist = sum([torch.norm(self.lego_pos - finger_pos, p=2, dim=-1) for finger_pos in fingers_pos])
-        E_dist = torch.clamp(0.1-finger_dist, None, 0)
-        E_dist = 4 * torch.exp(E_dist)
-        
-        # Penalize actions
-        arm_action_penalty = torch.sum(self.actions[:, :self.num_realman_dofs] ** 2, dim=-1) * 0.001
-        
-        # encourage the lego block to go up
-        weight_xyz = torch.tensor([-10, -10, 500], dtype=torch.float, device=self.device).repeat(self.num_envs, 1)
-        z_diff = (self.lego_pos[:, 2] - self.lego_start_pos[:, 2]).unsqueeze(-1)
-        xy_diff = torch.clamp(torch.abs(self.lego_pos[:, :2] - self.lego_start_pos[:, :2])-0.01, min=0)
-        E_lift = weight_xyz * torch.cat([xy_diff, z_diff], dim=-1)
-        # E_lift = torch.exp(E_lift)-0.5
-
-        dist_reward = E_dist - self.E_prev_dist
-        lego_up_reward = E_lift - self.E_prev_lift
-        total_reward = dist_reward - arm_action_penalty + lego_up_reward.sum(dim=1) - 0.01
-        
-        self.extras['dist_reward'] += dist_reward[0]
-        self.extras['action_penalty'] -= arm_action_penalty[0]
-        self.extras['lego_up_reward'] += lego_up_reward[0].to('cpu').numpy()
-        if self.enable_wandb:
-            wandb.log({'reward/dist_reward': self.extras['dist_reward'],
-                    'reward/action_penalty': self.extras['action_penalty'],
-                    'reward/lego_up_reward': self.extras['lego_up_reward'] 
-                    }, step=self.total_steps, commit=False)
-        
-        self.E_prev_lift = E_lift
-        self.E_prev_dist = E_dist
-        
-        resets = torch.where(finger_dist <= -1, torch.ones_like(self.reset_buf), self.reset_buf)
-        resets = torch.where(self.progress_buf[:] > self.max_episode_length, torch.ones_like(resets), resets)
-        
-        self.rew_buf[:], self.reset_buf[:] = total_reward, resets
-    
-    def compute_reward2(self):
-        ideal_grasp_distance = 0.08
-        k_dist = -10
-        k_grasp = 1
-        k_z_lift = 10
-        k_xy_move = 0
-        
-        # define distance between fingers and lego
-        grasp_fingers_pos = [(self.finger_thumb_pos + self.finger_index_pos)/2, (self.finger_thumb_pos + self.finger_middle_pos)/2]
-        finger_dist = sum([torch.norm(self.lego_pos - finger_pos, p=2, dim=-1) for finger_pos in grasp_fingers_pos])
-        finger_dist += torch.clamp(torch.norm(self.lego_pos - self.hand_base_pos, p=2, dim=-1) - 0.1, 0, None)
-        distance_reward = k_dist * torch.exp(- 5 * torch.clamp(finger_dist - 0.1, 0, None))
-        
-        # define grasp reward
-        grasp_reward = [0]
-        # fingers_pos = [self.finger_thumb_pos, self.finger_index_pos, self.finger_middle_pos]
-        # num_fingers = len(fingers_pos)
-        # for i in range(len(fingers_pos)):
-        #     for j in range(i + 1, num_fingers):
-        #         grasp_distance = torch.norm(fingers_pos[i] - fingers_pos[j], p=2, dim=-1)
-        #         grasp_reward -= torch.abs(grasp_distance - ideal_grasp_distance) * k_grasp
-        
-        # define the lift reward
-        lego_target_z = self.lego_start_pos[:, 2] + 0.7
-        lift_reward = k_z_lift * (1 / (torch.abs(self.lego_pos[:, 2] - lego_target_z) + 0.2) - 1/0.9) - \
-                      k_xy_move * torch.norm(self.lego_pos[:, :2]- self.lego_start_pos[:, :2], p=2, dim=-1)
-        
-        # Penalize actions
-        arm_action_penalty = torch.sum(self.actions[:, :self.num_realman_dofs] ** 2, dim=-1) * 0.005
-
-
-        total_reward = -arm_action_penalty + distance_reward + lift_reward
-        
-        self.extras['dist_reward'] += distance_reward[0]
-        self.extras['action_penalty'] -= arm_action_penalty[0]
-        self.extras['grasp_reward'] += grasp_reward[0]
-        self.extras['lego_up_reward'] += lift_reward[0].to('cpu').numpy()
-
-        resets = torch.where(finger_dist <= -1, torch.ones_like(self.reset_buf), self.reset_buf)
-        resets = torch.where(self.progress_buf[:] > self.max_episode_length, torch.ones_like(resets), resets)
-        self.rew_buf[:], self.reset_buf[:] = total_reward, resets
-    
-    def compute_reward3(self):
-        ideal_grasp_distance = 0.08
-        k_dist = -10
-        k_grasp = 1
-        k_z_lift = 10
-        k_xy_move = 0
-        
-        # define distance between fingers and lego
-        fingers_pos = [self.finger_thumb_pos, self.finger_index_pos, self.finger_middle_pos, self.finger_ring_pos, self.finger_pinky_pos]
-        finger_dist = sum([torch.norm(self.lego_pos - finger_pos, p=2, dim=-1) for finger_pos in fingers_pos])
-        # distance_reward = torch.exp(- 5 * torch.clamp(finger_dist - 0.1, 0, None))
-        distance_reward = - 0.1 * torch.clamp(finger_dist - 0.1, 0, None)
-        
-        # define grasp pose reward 
-        grasp_fingers_pos = [(self.finger_thumb_pos + self.finger_index_pos) / 2,
-                            #  (self.finger_thumb_pos + self.finger_index_pos) / 3, 
-                            #  (self.finger_thumb_pos + self.finger_index_pos) / 3 * 2,
-                             (self.finger_thumb_pos + self.finger_middle_pos)/ 2,
-                            #  (self.finger_thumb_pos + self.finger_middle_pos)/ 3,
-                            #  (self.finger_thumb_pos + self.finger_middle_pos)/ 3 * 2,
-                             (self.finger_index_pos + self.finger_middle_pos)/ 2,
-                             (self.finger_thumb_pos + self.finger_index_pos + self.finger_middle_pos) / 3]
-        pose_reward = sum([tolerance(point_, self.lego_pos, 0.017, 0.) for point_ in grasp_fingers_pos])/len(grasp_fingers_pos) * 10
-        
-        # define grasp reward
-        lego_target_z = self.lego_start_pos[:, 2] + 0.7
-        lift_reward = k_z_lift * (1 / (torch.abs(self.lego_pos[:, 2] - lego_target_z) + 0.2) - 1/0.9) - \
-                      k_xy_move * torch.norm(self.lego_pos[:, :2]- self.lego_start_pos[:, :2], p=2, dim=-1)
-                      
-        # Penalize actions
-        arm_action_penalty = torch.sum(self.actions[:, :self.num_realman_dofs] ** 2, dim=-1) * 0.005
-
-        total_reward = -arm_action_penalty + distance_reward + pose_reward + lift_reward
-        
-        self.extras['dist_reward'] += distance_reward[0]
-        self.extras['action_penalty'] -= arm_action_penalty[0]
-        self.extras['grasp_reward'] += pose_reward[0]
-        self.extras['lego_up_reward'] += lift_reward[0].to('cpu').numpy()
-
-        resets = torch.where(finger_dist <= -1, torch.ones_like(self.reset_buf), self.reset_buf)
-        resets = torch.where(self.progress_buf[:] > self.max_episode_length, torch.ones_like(resets), resets)
-        self.rew_buf[:], self.reset_buf[:] = total_reward, resets
-
-    def compute_reward4(self):
-        ideal_grasp_distance = 0.08
-        k_dist = -10
-        k_grasp = 1
-        k_z_lift = 10
-        k_xy_move = 0
-        
-        # define distance between fingers and lego
-        fingers_pos = [self.finger_thumb_pos, self.finger_index_pos]
-        finger_dist = sum([torch.norm(self.lego_pos - finger_pos, p=2, dim=-1) for finger_pos in fingers_pos])
-        distance_reward = 1.5 * torch.exp(- 5 * torch.clamp(finger_dist - 0.15, 0, None))
-        # distance_reward = - 0.1 * torch.clamp(finger_dist - 0.1, 0, None)
-        
-        # define grasp pose reward 
-        grasp_fingers_pos = [
-            # (self.finger_thumb_pos + self.finger_index_pos) / 2,
-        #  (self.finger_thumb_pos + self.finger_index_pos) / 3, 
-        #  (self.finger_thumb_pos + self.finger_index_pos) / 3 * 2,
-            # (self.finger_thumb_pos + self.finger_middle_pos)/ 2,
-        #  (self.finger_thumb_pos + self.finger_middle_pos)/ 3,
-        #  (self.finger_thumb_pos + self.finger_middle_pos)/ 3 * 2,
-            # (self.finger_index_pos + self.finger_middle_pos)/ 2,
-            self.middle_point
-        ]
-        pose_reward = sum([tolerance(point_, self.lego_pos, 0.016, 0.01) for point_ in grasp_fingers_pos]) / len(grasp_fingers_pos) * 10
-        angle_dist  = compute_angle_line_plane(self.finger_thumb_pos, self.finger_index_pos, self.z_unit_tensor)
-        angle_reward = torch.exp(-1*torch.abs(angle_dist)) * 0.4
-        
-        # define grasp reward
-        lego_target_z = self.lego_start_pos[:, 2] + 0.7
-        # lift_reward = k_z_lift * (1 / (torch.abs(self.lego_pos[:, 2] - lego_target_z) + 0.2) - 1/0.9) - \
-        #               k_xy_move * torch.norm(self.lego_pos[:, :2]- self.lego_start_pos[:, :2], p=2, dim=-1)
-        lift_distance = torch.abs(self.lego_pos[:, 2] - lego_target_z)
-        lift_reward = 150 * torch.clamp((0.7 - lift_distance), 0, None)
-        # lift_reward = 15 * torch.exp(-5 * torch.clamp(lift_distance**3, 0, None)) - 446/150
-                      
-        # Penalize actions
-        arm_action_penalty = torch.sum(self.actions[:, :self.num_realman_dofs] ** 2, dim=-1) * 0.001
-
-        # total_reward = -arm_action_penalty + (distance_reward + pose_reward + lift_reward - self.E_prev)
-        total_reward = -arm_action_penalty + (distance_reward + pose_reward + lift_reward + angle_reward - self.E_prev)
-        
-        
-        self.extras['dist_reward'] += distance_reward[0]
-        self.extras['action_penalty'] -= arm_action_penalty[0]
-        self.extras['grasp_reward'] += pose_reward[0]
-        self.extras['lego_up_reward'] += lift_reward[0].to('cpu').numpy()
-        self.extras['angle_reward'] += angle_reward[0]
-
-        self.E_prev = distance_reward + pose_reward + lift_reward + angle_reward
-        resets = torch.where(finger_dist <= -1, torch.ones_like(self.reset_buf), self.reset_buf)
-        resets = torch.where(self.progress_buf[:] > self.max_episode_length, torch.ones_like(resets), resets)
-        self.rew_buf[:], self.reset_buf[:] = total_reward, resets
-
     def compute_reward(self):
         # define distance between fingers and lego
         fingers_pos = [self.finger_thumb_pos, self.finger_index_pos]
         finger_dist = sum([torch.norm(self.lego_pos - finger_pos, p=2, dim=-1) for finger_pos in fingers_pos])
         distance_reward = 1.0 * torch.exp(- 5 * torch.clamp(finger_dist - 0.15, 0, None))
-        # distance_reward = - 0.1 * torch.clamp(finger_dist - 0.1, 0, None)
         
         # define grasp pose reward 
         grasp_fingers_pos = [
             self.middle_point
         ]
-        pose_reward = sum([tolerance(point_, self.lego_pos, 0.016, 0.01) for point_ in grasp_fingers_pos]) / len(grasp_fingers_pos) * 6
+        pose_dist = sum([tolerance(point_, self.lego_pos, 0.016, 0.01) for point_ in grasp_fingers_pos])
+        # print("pose_dist: ", pose_dist[0])
+        pose_reward = pose_dist / len(grasp_fingers_pos) * 6
         angle_dist  = compute_angle_line_plane(self.finger_thumb_pos, self.finger_index_pos, self.z_unit_tensor)
-        angle_reward = torch.exp(-1*torch.abs(angle_dist)) * 0.5
-        # angle_reward = 0
+        angle_reward = torch.exp(-1.0 * torch.abs(angle_dist)) * 0.5
         
         # define grasp reward
-        lift_distance = torch.abs(self.lego_start_pos[:, 2] + 0.7 - self.lego_pos[:, 2])
-        lift_reward = 200 * torch.clamp((0.7 - lift_distance), 0, None)
-        # lift_reward = 0
+        target_lift_height = 0.7
+        lift_distance = torch.abs(self.lego_start_pos[:, 2] + target_lift_height - self.lego_pos[:, 2])
+        # lift_reward = pose_dist * 500 * torch.clamp((target_lift_height- lift_distance), 0, None)
+        target_pos = self.lego_start_pos[0].clone() + torch.tensor([0, 0, target_lift_height]).to(self.device)
+        lift_reward = (tolerance(self.lego_pos, target_pos, 0.2, margin=0.7)-0.13) * 10
+         
+        # lift_reward = pose_dist * 1000 * torch.log(torch.clamp((target_lift_height- lift_distance), 0, None)+1.02)
+        # print("lift_reward: ", lift_reward[0])
                       
         # Penalize actions
-        total_reward = (distance_reward + pose_reward + lift_reward + angle_reward - self.E_prev)
+        # action_penalty = 0.001 * torch.sum(self.actions ** 2, dim=-1)
+        action_penalty = [0]
+        
+        total_reward = (distance_reward + pose_reward + lift_reward + angle_reward - self.E_prev) - action_penalty
         
         self.extras['dist_reward'] += distance_reward[0]
-        self.extras['grasp_reward'] += pose_reward[0]
+        self.extras['pose_reward'] += pose_reward[0]
         self.extras['lego_up_reward'] += lift_reward[0].to('cpu').numpy()
         self.extras['angle_reward'] += angle_reward[0]
+        self.extras['action_penalty'] += action_penalty[0]
 
         self.E_prev = distance_reward + pose_reward + lift_reward + angle_reward
         
@@ -774,10 +603,22 @@ class InspireGraspBlock(BaseTask):
         
         # reset object
         reset_lego_index = self.lego_indices[env_ids].view(-1)
-        self.root_state_tensor[reset_lego_index, 0:7] = self.lego_start_states[env_ids].view(-1, 13)[:, 0:7].clone()
-        self.root_state_tensor[reset_lego_index, 7:13] = torch.zeros_like(self.root_state_tensor[reset_lego_index, 7:13])
-        self.root_state_tensor[reset_lego_index, 0:1] = self.lego_start_states[env_ids].view(-1, 13)[:, 0:1].clone() + lego_init_rand_floats[:, 0].unsqueeze(-1) * 0.02
-        self.root_state_tensor[reset_lego_index, 1:2] = self.lego_start_states[env_ids].view(-1, 13)[:, 1:2].clone() + lego_init_rand_floats[:, 1].unsqueeze(-1) * 0.02
+        if self.randomize:
+            self.target_rot_rand = random.sample(range(4), 1)
+            quat = gymapi.Quat().from_euler_zyx(self.target_rot_rand[0] * 1.57, 0.0, rand_floats[0, 2] * 3.14)
+            self.root_state_tensor[reset_lego_index, 0] = rand_floats[:, 0] * 0.05 + 0.1
+            self.root_state_tensor[reset_lego_index, 1] = rand_floats[:, 1] * 0.05 + 0.2
+            self.root_state_tensor[reset_lego_index, 2] = 0.65
+            self.root_state_tensor[reset_lego_index, 3] = quat.x
+            self.root_state_tensor[reset_lego_index, 4] = quat.y
+            self.root_state_tensor[reset_lego_index, 5] = quat.z
+            self.root_state_tensor[reset_lego_index, 6] = quat.w
+            self.root_state_tensor[reset_lego_index, 7:13] = 0
+        else:
+            self.root_state_tensor[reset_lego_index, 0:7] = self.lego_start_states[env_ids].view(-1, 13)[:, 0:7].clone()
+            self.root_state_tensor[reset_lego_index, 7:13] = torch.zeros_like(self.root_state_tensor[reset_lego_index, 7:13])
+            self.root_state_tensor[reset_lego_index, 0:1] = self.lego_start_states[env_ids].view(-1, 13)[:, 0:1].clone() + lego_init_rand_floats[:, 0].unsqueeze(-1) * 0.02
+            self.root_state_tensor[reset_lego_index, 1:2] = self.lego_start_states[env_ids].view(-1, 13)[:, 1:2].clone() + lego_init_rand_floats[:, 1].unsqueeze(-1) * 0.02
         object_indices = torch.unique(self.lego_indices[env_ids].view(-1)).to(torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.root_state_tensor),gymtorch.unwrap_tensor(object_indices), len(object_indices))
         
@@ -790,25 +631,24 @@ class InspireGraspBlock(BaseTask):
         self.gym.set_dof_position_target_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.prev_targets), gymtorch.unwrap_tensor(hand_indices), len(env_ids))
         self.gym.set_dof_state_tensor_indexed(self.sim,gymtorch.unwrap_tensor(self.dof_state), gymtorch.unwrap_tensor(hand_indices), len(env_ids))
 
-        self.E_prev_lift[env_ids, :] = to_torch([0.0, 0.0, 0.0], device=self.device).repeat(len(env_ids), 1)
-        self.E_prev_dist[env_ids] = to_torch([0.0], device=self.device).repeat(len(env_ids))
         self.E_prev[env_ids] = to_torch([0.0], device=self.device).repeat(len(env_ids))
         
         self.post_reset(env_ids, hand_indices)
         print("dist_reward: ", self.extras['dist_reward'])
-        print("grasp_reward: ", self.extras['grasp_reward'])
+        print("pose_reward: ", self.extras['pose_reward'])
         print("lego_up_reward: ", self.extras['lego_up_reward'])
         print("action_penalty: ", self.extras['action_penalty'])
         print("angle_reward: ", self.extras['angle_reward'])
         if self.enable_wandb:
             wandb.log({'reward/dist_reward': self.extras['dist_reward'],
-                       "reward/grasp_reward": self.extras['grasp_reward'],
+                       "reward/pose_reward": self.extras['pose_reward'],
                        'reward/lego_up_reward': self.extras['lego_up_reward'], 
                        'reward/action_penalty': self.extras['action_penalty'],
+                       'reward/angle_reward': self.extras['angle_reward']
                        }, step=self.total_steps, commit=False)
 
         if 0 in env_ids:
-            self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "grasp_reward": 0, 'angle_reward': 0}
+            self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, 'angle_reward': 0}
         
         self.progress_buf[env_ids] = 0
         self.reset_buf[env_ids] = 0
@@ -830,8 +670,7 @@ class InspireGraspBlock(BaseTask):
         self.gym.set_dof_position_target_tensor_indexed(self.sim,gymtorch.unwrap_tensor(self.prev_targets), gymtorch.unwrap_tensor(hand_indices), len(env_ids))
         self.gym.set_dof_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.dof_state), gymtorch.unwrap_tensor(hand_indices), len(env_ids))
         self.lego_start_pos[env_ids, :] = self.lego_pos[env_ids, :].clone()
-        
-             
+               
     def pre_physics_step(self, actions):
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(env_ids) > 0:
@@ -876,7 +715,7 @@ class InspireGraspBlock(BaseTask):
             self.arm_hand_dof_lower_limits[:],
             self.arm_hand_dof_upper_limits[:]
         )
-        # self.cur_targets = self.arm_hand_prepare_dof_pos.repeat(self.num_envs, 1).to(self.device)
+        
         self.prev_targets[:, :] = self.cur_targets[:, :]
         self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.cur_targets))
     
@@ -887,24 +726,6 @@ class InspireGraspBlock(BaseTask):
         self.compute_observation()
         self.compute_reward()
         self.total_steps += 1
-        
-        # self.gym.clear_lines(self.viewer)
-        # self.gym.refresh_rigid_body_state_tensor(self.sim)
-        # self.add_debug_lines(self.envs[0], self.hand_base_pos[0], self.hand_base_rot[0])
-        # self.add_debug_lines(self.envs[0], self.segmentation_target_pos[0], self.segmentation_target_rot[0])
-        # draw_point(self.gym, self.viewer, self.envs[0], self.hand_base_pos[0], self.hand_base_rot[0], color=(1, 0, 0), radius=0.05)
-        
-        # self.finger_thumb_pos += quat_apply(self.finger_thumb_rot[:], to_torch([0, 0.5, 0.1], device=self.device).repeat(self.num_envs, 1) * 0.04)
-        # self.finger_index_pos += quat_apply(self.finger_index_rot[:], to_torch([0.18, 0.9, 0.1], device=self.device).repeat(self.num_envs, 1) * 0.04)
-        # self.finger_middle_pos+= quat_apply(self.finger_middle_rot[:], to_torch([0.15, 0.9, 0.1],device=self.device).repeat(self.num_envs, 1) * 0.04)
-        # self.finger_ring_pos  += quat_apply(self.finger_ring_rot[:], to_torch([0.2, 0.9, 0.1],  device=self.device).repeat(self.num_envs, 1) * 0.04)
-        # self.finger_pinky_pos += quat_apply(self.finger_pinky_rot[:], to_torch([0.2, 0.8, 0.1], device=self.device).repeat(self.num_envs, 1) * 0.04)
-        
-        # draw_point(self.gym, self.viewer, self.envs[0], self.finger_thumb_pos[0], self.finger_thumb_rot[0], color=(0, 1, 0), radius=0.005)
-        # draw_point(self.gym, self.viewer, self.envs[0], self.finger_index_pos[0], self.finger_index_rot[0], color=(0, 1, 0), radius=0.005)
-        # draw_point(self.gym, self.viewer, self.envs[0], self.finger_middle_pos[0], self.finger_middle_rot[0], color=(0, 1, 0), radius=0.005)
-        # draw_point(self.gym, self.viewer, self.envs[0], self.finger_ring_pos[0], self.finger_ring_rot[0], color=(0, 1, 0),  radius=0.005)
-        # draw_point(self.gym, self.viewer, self.envs[0], self.finger_pinky_pos[0], self.finger_pinky_rot[0], color=(0, 1, 0), radius=0.005)
         
         # info
         if self.print_success_stat:
@@ -919,11 +740,8 @@ class InspireGraspBlock(BaseTask):
 
         # self.add_debug_lines(self.envs[0], middle_pos[0], self.finger_thumb_rot[0])
         # self.add_debug_lines(self.envs[0], self.lego_pos[0], self.lego_rot[0])
-        draw_point(self.gym, self.viewer, self.envs[0], self.lego_pos[0], self.lego_rot[0], color=(1, 0, 0), radius=0.015)
-        draw_point(self.gym, self.viewer, self.envs[0], self.middle_point[0], self.finger_thumb_rot[0], color=(1, 0, 0), radius=0.016)
-        ik_point = self.rigid_body_states[:, self.hand_base_rigid_body_index, :3]
-        ik_point[:, 2] -= 0.07
-        ik_point[:, 0] += 0.16
+        # draw_point(self.gym, self.viewer, self.envs[0], self.lego_pos[0], self.lego_rot[0], color=(1, 0, 0), radius=0.015)
+        # draw_point(self.gym, self.viewer, self.envs[0], self.middle_point[0], self.finger_thumb_rot[0], color=(1, 0, 0), radius=0.016)
         # draw_point(self.gym, self.viewer, self.envs[0], ik_point[0], self.hand_base_rot[0], color=(0, 0, 1), radius=0.02)
     
     def add_debug_lines(self, env, pos, rot):
