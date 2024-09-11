@@ -46,6 +46,7 @@ class InspireGraspBlock(BaseTask):
         self.print_success_stat = self.cfg["env"]["printNumSuccesses"]
         self.max_consecutive_successes = self.cfg["env"]["maxConsecutiveSuccesses"]
         self.enable_camera_sensors = self.cfg["env"]["enable_camera_sensors"]
+        self.enable_wandb = self.cfg["env"]["enable_wandb"]
         # Check
         self.cfg["env"]["numObservations"] = 175 - 24
         self.cfg["env"]["numStates"] = 175 - 24
@@ -136,7 +137,7 @@ class InspireGraspBlock(BaseTask):
         print("hand_base_rigid_body_index: ", self.hand_base_rigid_body_index)
         
         self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, "angle_reward": 0}
-        self.enable_wandb = False
+        
         
         self._init_wandb()
     
@@ -477,7 +478,6 @@ class InspireGraspBlock(BaseTask):
         grasp_fingers_pos = [
             self.middle_point
         ]
-<<<<<<< HEAD
         pose_dist = sum([tolerance(point_, self.lego_pos, 0.016, 0.01) for point_ in grasp_fingers_pos]) / len(grasp_fingers_pos)
         pose_reward = pose_dist * 6
         
@@ -488,38 +488,28 @@ class InspireGraspBlock(BaseTask):
         
         # define grasp reward
         target_lift_height = 0.3
-        target_pos = self.lego_start_pos.clone() + torch.tensor([0, 0, target_lift_height]).repeat(self.num_envs, 1).to(self.device)
-        goal_dist = torch.norm(self.lego_pos - target_pos, p=2, dim=-1)
-        lift_reward = pose_dist * 150 * (0.02+target_lift_height - goal_dist)
+        z_lift = torch.abs(self.lego_start_pos[:, 2] + target_lift_height - self.lego_pos[:, 2])
+        xy_move = torch.norm(self.lego_start_pos[:, 0:2] - self.lego_pos[:, 0:2], p=2, dim=-1)
+        # 3k episode work
+        # lift_reward = pose_dist * 400 * (torch.clamp(target_lift_height- z_lift, min=-0.1, max=None) - 0.0 * xy_move)
+        diff_ = target_lift_height- z_lift
+        lift_reward = pose_dist * 400 * (torch.clamp(diff_, min=-0.1, max=None) - diff_/target_lift_height/2 * xy_move)
         
+        # m3
+        # target_pos = self.lego_start_pos.clone() + torch.tensor([0, 0, target_lift_height]).repeat(self.num_envs, 1).to(self.device)
+        # goal_dist = torch.norm(self.lego_pos - target_pos, p=2, dim=-1)
+        # lift_reward = pose_dist * 400 * (0.02+target_lift_height - goal_dist)
+        
+        # m2
         # lift_distance = torch.abs(self.lego_start_pos[:, 2] + target_lift_height - self.lego_pos[:, 2])
         # lift_reward = pose_dist * 400 * torch.clamp((target_lift_height- lift_distance), 0, None)
+        
+        # m1
         # target_pos = self.lego_start_pos[0].clone() + torch.tensor([0, 0, target_lift_height]).to(self.device)
         # lift_reward = pose_dist * (tolerance(self.lego_pos, target_pos, 0.2, margin=0.7)-0.13) * 10
-                      
+        
         # Penalize actions
         action_penalty = 0.001 * torch.sum(self.actions ** 2, dim=-1)
-=======
-        pose_dist = sum([tolerance(point_, self.lego_pos, 0.016, 0.01) for point_ in grasp_fingers_pos])
-        # print("pose_dist: ", pose_dist[0])
-        pose_reward = pose_dist / len(grasp_fingers_pos) * 6
-        angle_dist  = compute_angle_line_plane(self.finger_thumb_pos, self.finger_index_pos, self.z_unit_tensor)
-        angle_reward = torch.exp(-1.0 * torch.abs(angle_dist)) * 0.5
-        
-        # define grasp reward
-        target_lift_height = 0.7
-        lift_distance = torch.abs(self.lego_start_pos[:, 2] + target_lift_height - self.lego_pos[:, 2])
-        # lift_reward = pose_dist * 500 * torch.clamp((target_lift_height- lift_distance), 0, None)
-        target_pos = self.lego_start_pos[0].clone() + torch.tensor([0, 0, target_lift_height]).to(self.device)
-        lift_reward = (tolerance(self.lego_pos, target_pos, 0.2, margin=0.7)-0.13) * 10
-         
-        # lift_reward = pose_dist * 1000 * torch.log(torch.clamp((target_lift_height- lift_distance), 0, None)+1.02)
-        # print("lift_reward: ", lift_reward[0])
-                      
-        # Penalize actions
-        # action_penalty = 0.001 * torch.sum(self.actions ** 2, dim=-1)
-        action_penalty = [0]
->>>>>>> 3f37acb46711cfbfcdb70dbc201e9d82d300d6ef
         
         total_reward = (distance_reward + pose_reward + lift_reward + angle_reward - self.E_prev) - action_penalty
         
@@ -630,17 +620,11 @@ class InspireGraspBlock(BaseTask):
         if self.randomize:
             self.target_rot_rand = random.sample(range(4), 1)
             quat = gymapi.Quat().from_euler_zyx(self.target_rot_rand[0] * 1.57, 0.0, rand_floats[0, 2] * 3.14)
-<<<<<<< HEAD
             start_pos = self.lego_start_states[env_ids].view(-1, 13).clone() 
-            self.root_state_tensor[reset_lego_index, 0] = start_pos[:,0] + rand_floats[:, 0] * 0.1 + 0.04
-            self.root_state_tensor[reset_lego_index, 1] = start_pos[:,1] + rand_floats[:, 1] * 0.1
+            self.root_state_tensor[reset_lego_index, 0] = start_pos[:,0] + rand_floats[:, 0] * 0.05 + 0.04
+            self.root_state_tensor[reset_lego_index, 1] = start_pos[:,1] + rand_floats[:, 1] * 0.05
             self.root_state_tensor[reset_lego_index, 2] = 0.65
             # self.root_state_tensor[reset_lego_index, 3:7] = start_pos[:,3:7]
-=======
-            self.root_state_tensor[reset_lego_index, 0] = rand_floats[:, 0] * 0.05 + 0.1
-            self.root_state_tensor[reset_lego_index, 1] = rand_floats[:, 1] * 0.05 + 0.2
-            self.root_state_tensor[reset_lego_index, 2] = 0.65
->>>>>>> 3f37acb46711cfbfcdb70dbc201e9d82d300d6ef
             self.root_state_tensor[reset_lego_index, 3] = quat.x
             self.root_state_tensor[reset_lego_index, 4] = quat.y
             self.root_state_tensor[reset_lego_index, 5] = quat.z
@@ -676,12 +660,8 @@ class InspireGraspBlock(BaseTask):
                        "reward/pose_reward": self.extras['pose_reward'],
                        'reward/lego_up_reward': self.extras['lego_up_reward'], 
                        'reward/action_penalty': self.extras['action_penalty'],
-<<<<<<< HEAD
                        'reward/angle_reward': self.extras['angle_reward'],
                           'reward/total_reward': sum([i for i in self.extras.values()])
-=======
-                       'reward/angle_reward': self.extras['angle_reward']
->>>>>>> 3f37acb46711cfbfcdb70dbc201e9d82d300d6ef
                        }, step=self.total_steps, commit=False)
 
         if 0 in env_ids:

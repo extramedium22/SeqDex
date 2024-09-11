@@ -8,12 +8,13 @@ env:
   handResetStep: 45
   enableDebugVis: False
   enable_camera_sensors: False
+  enable_wandb: False
   aggregateMode: 1
 
   stiffnessScale: 1.0
   forceLimitScale: 1.0
   useRelativeControl: False
-  dofSpeedScale: 1.0
+  dofSpeedScale: 3.0
   actionsMovingAverage: 0.8
   controlFrequencyInv: 1 # 60 Hz
 
@@ -49,7 +50,7 @@ env:
     assetFileNamePen: "mjcf/open_ai_assets/hand/pen.xml"
 
 task:
-  randomize: False
+  randomize: True
   randomization_params:
     frequency: 1000   # Define how many simulation steps between generating new randomizations
     observations:
