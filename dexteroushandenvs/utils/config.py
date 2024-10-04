@@ -80,6 +80,8 @@ def retrieve_cfg(args, use_rlg_config=False):
         return os.path.join(args.logdir, "realman_inspire_block_assembly_search/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/realman_inspire_block_assembly_search.yaml"
     elif args.task == "InspireGraspBlock":
         return os.path.join(args.logdir, "realman_inspire_grasp_block/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/realman_inspire_grasp_block.yaml"
+    elif args.task == "InspireSearchBlock":
+        return os.path.join(args.logdir, "realman_inspire_search_block/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/realman_inspire_search_block.yaml"
     elif args.task == "ToolPositioningChainPureRL":
         return os.path.join(args.logdir, "allegro_hand_tool_positioning_chain_pure_rl/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/allegro_hand_tool_positioning_chain_pure_rl.yaml"
     elif args.task == "ToolPositioningChainTSTAR":

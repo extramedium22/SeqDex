@@ -27,7 +27,7 @@ import yaml
 # from utils.rl_games_custom import 
 from rl_games.common.algo_observer import IsaacAlgoObserver
 
-# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 
 if __name__ == '__main__':
@@ -42,7 +42,7 @@ if __name__ == '__main__':
         config_name = "cfg/{}/ppo_continuous.yaml".format(args.algo)
     elif args.algo == "lego":
         config_name = "cfg/{}/ppo_continuous.yaml".format(args.algo)
-        if args.task in ["InspireBlockAssemblySearch", "InspireGraspBlock"] + \
+        if args.task in ["InspireBlockAssemblySearch", "InspireGraspBlock", "InspireSearchBlock"] + \
             ["BlockAssemblySearch", "BlockAssemblyGrasp", "BlockAssemblyGraspSim", "BlockAssemblyOrient", "BlockAssemblyOrientOnce", \
                 "ToolPositioningChainPureRL", "ToolPositioningChainTSTAR", "ToolPositioningChain", "ToolPositioningOrient", "ToolPositioningGrasp"]:
             config_name = "cfg/{}/ppo_continuous_grasp.yaml".format(args.algo)
