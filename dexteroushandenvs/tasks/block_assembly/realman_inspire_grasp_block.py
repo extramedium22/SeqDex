@@ -136,7 +136,8 @@ class InspireGraspBlock(BaseTask):
         print("Contact Tensor Dimension", self.contact_tensor.shape)
         print("hand_base_rigid_body_index: ", self.hand_base_rigid_body_index)
         
-        self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, "angle_reward": 0}
+        self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, "angle_reward": 0,
+                       'z_lift': 0, 'xy_move': 0}
         
         
         self._init_wandb()
@@ -487,13 +488,21 @@ class InspireGraspBlock(BaseTask):
         angle_reward = torch.exp(-1.0 * torch.abs(angle_dist)) * 0.5
         
         # define grasp reward
+        # target_lift_height = 0.3
+        # z_lift = torch.abs(self.lego_start_pos[:, 2] + target_lift_height - self.lego_pos[:, 2])
+        # xy_move = torch.norm(self.lego_start_pos[:, 0:2] - self.lego_pos[:, 0:2], p=2, dim=-1)
+        # # 3k episode work
+        # # lift_reward = pose_dist * 400 * (torch.clamp(target_lift_height- z_lift, min=-0.1, max=None) - 0.0 * xy_move)
+        # diff_ = target_lift_height - z_lift
+        # lift_reward = pose_dist * 400 * (torch.clamp(diff_, min=-0.05, max=None) - 2 * torch.clamp(diff_, min=0) / target_lift_height * xy_move)
+        
         target_lift_height = 0.3
         z_lift = torch.abs(self.lego_start_pos[:, 2] + target_lift_height - self.lego_pos[:, 2])
         xy_move = torch.norm(self.lego_start_pos[:, 0:2] - self.lego_pos[:, 0:2], p=2, dim=-1)
-        # 3k episode work
-        # lift_reward = pose_dist * 400 * (torch.clamp(target_lift_height- z_lift, min=-0.1, max=None) - 0.0 * xy_move)
-        diff_ = target_lift_height- z_lift
-        lift_reward = pose_dist * 400 * (torch.clamp(diff_, min=-0.1, max=None) - diff_/target_lift_height/2 * xy_move)
+        target_pos = self.lego_start_pos.clone() + torch.tensor([0, 0, target_lift_height]).repeat(self.num_envs, 1).to(self.device)
+        goal_dist = torch.norm(self.lego_pos - target_pos, p=2, dim=-1)
+        lift_reward = pose_dist * 400 * torch.clamp((target_lift_height- goal_dist), -0.05, None)
+        
         
         # m3
         # target_pos = self.lego_start_pos.clone() + torch.tensor([0, 0, target_lift_height]).repeat(self.num_envs, 1).to(self.device)
@@ -518,6 +527,8 @@ class InspireGraspBlock(BaseTask):
         self.extras['lego_up_reward'] += lift_reward[0].to('cpu').numpy()
         self.extras['angle_reward'] += angle_reward[0]
         self.extras['action_penalty'] += action_penalty[0]
+        self.extras['z_lift'] = z_lift[0]
+        self.extras['xy_move'] = xy_move[0]
 
         self.E_prev = distance_reward + pose_reward + lift_reward + angle_reward
         
@@ -661,7 +672,9 @@ class InspireGraspBlock(BaseTask):
                        'reward/lego_up_reward': self.extras['lego_up_reward'], 
                        'reward/action_penalty': self.extras['action_penalty'],
                        'reward/angle_reward': self.extras['angle_reward'],
-                          'reward/total_reward': sum([i for i in self.extras.values()])
+                       'reward/total_reward': sum([i for i in self.extras.values()]),
+                       'dist/z_lift': self.extras['z_lift'],
+                       'dist/xy_move': self.extras['xy_move']
                        }, step=self.total_steps, commit=False)
 
         if 0 in env_ids:
