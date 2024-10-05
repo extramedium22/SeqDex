@@ -45,6 +45,7 @@ class InspireSearchBlock(BaseTask):
         self.act_moving_average = self.cfg["env"]["actionsMovingAverage"]
         self.arm_hand_dof_speed_scale = self.cfg["env"]["dofSpeedScale"]
         self.max_episode_length = self.cfg["env"]["episodeLength"]
+        self.hand_reset_step = self.cfg["env"]["handResetStep"]
         self.print_success_stat = self.cfg["env"]["printNumSuccesses"]
         self.max_consecutive_successes = self.cfg["env"]["maxConsecutiveSuccesses"]
         self.enable_camera_sensors = self.cfg["env"]["enable_camera_sensors"]
@@ -137,10 +138,10 @@ class InspireSearchBlock(BaseTask):
         print("Contact Tensor Dimension", self.contact_tensor.shape)
         print("hand_base_rigid_body_index: ", self.hand_base_rigid_body_index)
         
-        self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, "angle_reward": 0,
+        self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, "angle_reward": 0, "emergency_reward": 0,
                        'z_lift': 0, 'xy_move': 0}
         
-        
+        self.max_pixel_value = -np.inf
         self._init_wandb()
     
     def _init_wandb(self):
@@ -365,6 +366,13 @@ class InspireSearchBlock(BaseTask):
         self.robot_indices, self.table_indices, self.lego_indices, self.extra_obj_indices, self.seg_indices = [], [], [], [], []
         self.actor_index = {}
         self.envs = []
+        # something for camera
+        self.cameras = []
+        self.camera_tensors = []
+        self.camera_seg_tensors = []
+        self.camera_view_matrixs = []
+        self.camera_proj_matrixs = []
+        
         # compute aggregate size
         max_agg_bodies = self.num_arm_hand_bodies + 2 + 1 + len(lego_assets) + 5 + 10 
         max_agg_shapes = self.num_arm_hand_shapes + 2 + 1 + len(lego_assets) + 5 + 100 
@@ -456,6 +464,43 @@ class InspireSearchBlock(BaseTask):
             self.gym.set_rigid_body_color(env_ptr, extra_lego_handle, 0, gymapi.MESH_VISUAL, gymapi.Vec3(1, 1, 1))
             self.extra_obj_indices.append(extra_object_idx)
             
+            
+            if self.enable_camera_sensors:
+                # camera properties
+                self.camera_props = gymapi.CameraProperties()
+                self.camera_props.width = 128
+                self.camera_props.height = 128
+                self.camera_props.enable_tensors = True
+                self.env_origin = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
+                # self.camera_u = torch.arange(0, self.camera_props.width, device=self.device)
+                # self.camera_v = torch.arange(0, self.camera_props.height, device=self.device)
+                # self.camera_v2, self.camera_u2 = torch.meshgrid(self.camera_v, self.camera_u, indexing='ij')
+
+                self.camera_offset_quat = gymapi.Quat().from_euler_zyx(0, - 3.141 + 0.5, 1.571)
+                self.camera_offset_quat = to_torch([self.camera_offset_quat.x, self.camera_offset_quat.y, self.camera_offset_quat.z, self.camera_offset_quat.w], device=self.device)
+                self.camera_offset_pos = to_torch([0.03, 0.107 - 0.098, 0.067 + 0.107], device=self.device)
+                
+                camera_handle = self.gym.create_camera_sensor(env_ptr, self.camera_props)
+                self.gym.set_camera_location(camera_handle, env_ptr, gymapi.Vec3(0.35, 0.19, 1.0), gymapi.Vec3(0.2, 0.19, 0))
+                camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_ptr, camera_handle, gymapi.IMAGE_COLOR)
+                torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor)
+                camera_seg_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_ptr, camera_handle, gymapi.IMAGE_SEGMENTATION)
+                torch_cam_seg_tensor = gymtorch.wrap_tensor(camera_seg_tensor)
+
+                cam_vinv = torch.inverse((torch.tensor(self.gym.get_camera_view_matrix(self.sim, env_ptr, camera_handle)))).to(self.device)
+                cam_proj = torch.tensor(self.gym.get_camera_proj_matrix(self.sim, env_ptr, camera_handle), device=self.device)
+                self.mount_rigid_body_index = self.gym.find_actor_rigid_body_index(env_ptr, arm_hand_actor, "Link7", gymapi.DOMAIN_ENV)
+                
+                origin = self.gym.get_env_origin(env_ptr)
+                self.env_origin[env_id][0] = origin.x
+                self.env_origin[env_id][1] = origin.y
+                self.env_origin[env_id][2] = origin.z
+                self.camera_tensors.append(torch_cam_tensor)
+                self.camera_seg_tensors.append(torch_cam_seg_tensor)
+                self.camera_view_matrixs.append(cam_vinv)
+                self.camera_proj_matrixs.append(cam_proj)
+                self.cameras.append(camera_handle)
+
             if self.aggregate_mode > 0:
                 self.gym.end_aggregate(env_ptr)
             
@@ -472,14 +517,58 @@ class InspireSearchBlock(BaseTask):
         self.robot_indices = to_torch(self.robot_indices, dtype=torch.long, device=self.device)
         self.lego_indices = to_torch(self.lego_indices, dtype=torch.long, device=self.device)
         self.seg_indices = to_torch(self.seg_indices, dtype=torch.long, device=self.device)
-        
+        # camera
+        self.emergence_reward = torch.zeros_like(self.rew_buf, device=self.device, dtype=torch.float)
+        self.emergence_pixel = torch.zeros_like(self.rew_buf, device=self.device, dtype=torch.float)
+        self.last_emergence_pixel = torch.zeros_like(self.rew_buf, device=self.device, dtype=torch.float)
+        self.emergence_reward_buf = torch.zeros_like(self.rew_buf, device=self.device, dtype=torch.float)     
+    
     def compute_observation(self):
         # refresh the anything
-        self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
+        self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_jacobian_tensors(self.sim)
+        
+        # camera setup
+        if self.enable_camera_sensors and self.progress_buf[0] >= self.max_episode_length - 1:
+            pos = self.arm_hand_default_dof_pos
+            self.arm_hand_dof_pos[:, :] = pos[:]
+            self.arm_hand_dof_vel[:, :] = self.arm_hand_dof_default_vel
+            self.prev_targets[:, :self.num_arm_hand_dofs] = pos
+            self.cur_targets[:, :self.num_arm_hand_dofs] = pos
+
+            self.gym.set_dof_state_tensor_indexed(self.sim,
+                                                gymtorch.unwrap_tensor(self.dof_state),
+                                                gymtorch.unwrap_tensor(self.robot_indices.to(torch.int32)), self.num_envs)
+
+            for i in range(1):
+                self.render()
+                self.gym.simulate(self.sim)
+
+            self.render_for_camera()
+            self.gym.fetch_results(self.sim, True)
+            self.gym.refresh_dof_state_tensor(self.sim)
+            self.gym.refresh_actor_root_state_tensor(self.sim)
+            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            self.gym.refresh_jacobian_tensors(self.sim)
+            self.gym.render_all_camera_sensors(self.sim)
+            self.gym.start_access_image_tensors(self.sim)
+
+            self.compute_emergence_reward(self.camera_tensors, self.camera_seg_tensors, segmentation_id_list=self.segmentation_id_list)
+            self.all_lego_brick_pos = self.root_state_tensor[self.lego_indices[:].view(-1), 0:3].clone().view(self.num_envs, -1, 3)
+            # self.compute_heap_movement_penalty(self.all_lego_brick_pos)
+
+            camera_rgba_image = camera_rgb_visulization(self.camera_tensors, env_id=0, is_depth_image=False)
+            camera_seg_image = camera_segmentation_visulization(self.segmentation_id_list, self.camera_tensors, self.camera_seg_tensors, env_id=0, is_depth_image=False)
+
+            cv2.namedWindow("DEBUG_RGB_VIS", 0)
+            cv2.namedWindow("DEBUG_SEG_VIS", 0)
+
+            cv2.imshow("DEBUG_RGB_VIS", camera_rgba_image)
+            cv2.imshow("DEBUG_SEG_VIS", camera_seg_image)
+            cv2.waitKey(1)
         
         # define the observation
         # hand
@@ -530,6 +619,17 @@ class InspireSearchBlock(BaseTask):
         
         # add ball to visualize the finger tip
         self.compute_contact_asymmetric_observations()
+        
+        # object 6d pose randomization
+        if self.enable_camera_sensors:
+            self.mount_pos = self.rigid_body_states[:, self.mount_rigid_body_index, 0:3]
+            self.mount_rot = self.rigid_body_states[:, self.mount_rigid_body_index, 3:7]
+            self.q_camera, self.p_camera = tf_combine(self.mount_rot, self.mount_pos, self.camera_offset_quat.repeat(self.num_envs, 1), self.camera_offset_pos.repeat(self.num_envs, 1))
+            self.q_camera_inv, self.p_camera_inv = tf_inverse(self.q_camera, self.p_camera)
+            self.camera_view_segmentation_target_rot, self.camera_view_segmentation_target_pos = tf_combine(self.q_camera_inv, self.p_camera_inv, self.seg_rot, self.seg_pos)
+        
+        if self.enable_camera_sensors and self.progress_buf[0] % self.hand_reset_step == 0 and self.progress_buf[0] != 0:
+            self.gym.end_access_image_tensors(self.sim)
     
     def compute_contact_asymmetric_observations(self):
         # 0:19 => hand_arm_dof_pos 
@@ -617,6 +717,14 @@ class InspireSearchBlock(BaseTask):
         
         self.obs_buf = self.states_buf
 
+    def compute_emergence_reward(self, camera_tensors, camera_seg_tensors, segmentation_id_list=0):
+        for i in range(self.num_envs):
+            torch_seg_tensor = camera_seg_tensors[i]
+            self.emergence_pixel[i] = torch_seg_tensor[torch_seg_tensor == segmentation_id_list[i]].shape[0]
+        self.emergence_reward = (self.emergence_pixel - self.last_emergence_pixel) / 100
+        print("emergence_reward: ", self.emergence_reward[0])
+        self.last_emergence_pixel = self.emergence_pixel.clone()
+    
     def compute_reward(self):
         # define distance between fingers and lego
         fingers_pos = [self.finger_thumb_pos, self.finger_index_pos]
@@ -635,7 +743,7 @@ class InspireSearchBlock(BaseTask):
         angle_dist  = sum([compute_angle_line_plane(self.finger_thumb_pos, finger, self.z_unit_tensor) for finger  in angle_finger]) / len(angle_finger)
         angle_reward = distance_reward * torch.exp(-1.0 * torch.abs(angle_dist)) * 0.5
         
-        # define grasp rewardj
+        # define grasp reward
         target_lift_height = 0.3
         z_lift = torch.abs(self.seg_start_pos[:, 2] + target_lift_height - self.seg_pos[:, 2])
         xy_move = torch.norm(self.seg_start_pos[:, 0:2] - self.seg_pos[:, 0:2], p=2, dim=-1)
@@ -643,20 +751,26 @@ class InspireSearchBlock(BaseTask):
         goal_dist = torch.norm(self.seg_pos - target_pos, p=2, dim=-1)
         lift_reward = pose_dist * 400 * torch.clamp((target_lift_height- goal_dist), -0.05, None)
         
+        # define emergency reward
+        emergency_reward = self.emergence_reward
+        # curr_pixel_diff = torch.cat((emergency_reward, torch.zeros((self.num_envs, 2))), dim=1)
+        # emergency_reward = tolerance(curr_pixel_diff, torch.zeros_like(self.emergence_reward), 0.1, 0.1)
+        
         # Penalize actions
         action_penalty = 0.001 * torch.sum(self.actions ** 2, dim=-1)
         
-        total_reward = (distance_reward + pose_reward + lift_reward + angle_reward - self.E_prev) - action_penalty
+        total_reward = (distance_reward + pose_reward + lift_reward + angle_reward + emergency_reward - self.E_prev) - action_penalty
         
         self.extras['dist_reward'] += distance_reward[0]
         self.extras['pose_reward'] += pose_reward[0]
-        self.extras['lego_up_reward'] += lift_reward[0].to('cpu').numpy()
+        self.extras['lego_up_reward'] += lift_reward[0]
         self.extras['angle_reward'] += angle_reward[0]
         self.extras['action_penalty'] += action_penalty[0]
+        self.extras['emergency_reward'] += emergency_reward[0]
         self.extras['z_lift'] = z_lift[0]
         self.extras['xy_move'] = xy_move[0]
 
-        self.E_prev = distance_reward + pose_reward + lift_reward + angle_reward
+        self.E_prev = distance_reward + pose_reward + lift_reward + angle_reward + emergency_reward
         
         resets = torch.where(finger_dist <= -1, torch.ones_like(self.reset_buf), self.reset_buf)
         resets = torch.where(self.progress_buf[:] > self.max_episode_length, torch.ones_like(resets), resets)
@@ -755,8 +869,6 @@ class InspireSearchBlock(BaseTask):
 
         # reset segmentation object start pos
         reset_lego_index = self.seg_indices[env_ids].view(-1)
-        # self.root_state_tensor[reset_lego_index, 0] = 0.25 + rand_floats[env_ids, 0] * 0.2
-        # self.root_state_tensor[reset_lego_index, 1] = 0.19 + rand_floats[env_ids, 0] * 0.15
         self.root_state_tensor[reset_lego_index, 0] = 0.25 + rand_floats[env_ids, 0] * 0.05
         self.root_state_tensor[reset_lego_index, 1] = 0.19 + rand_floats[env_ids, 0] * 0.05
         self.root_state_tensor[reset_lego_index, 2] = 0.9
@@ -776,24 +888,34 @@ class InspireSearchBlock(BaseTask):
         self.E_prev[env_ids] = to_torch([0.0], device=self.device).repeat(len(env_ids))
         
         self.post_reset(env_ids, hand_indices)
-        print("dist_reward: ", self.extras['dist_reward'])
-        print("pose_reward: ", self.extras['pose_reward'])
-        print("lego_up_reward: ", self.extras['lego_up_reward'])
-        print("action_penalty: ", self.extras['action_penalty'])
-        print("angle_reward: ", self.extras['angle_reward'])
         if self.enable_wandb:
             wandb.log({'reward/dist_reward': self.extras['dist_reward'],
                        "reward/pose_reward": self.extras['pose_reward'],
                        'reward/lego_up_reward': self.extras['lego_up_reward'], 
                        'reward/action_penalty': self.extras['action_penalty'],
                        'reward/angle_reward': self.extras['angle_reward'],
+                       'reward/emergency_reward': self.extras['emergency_reward'],
                        'reward/total_reward': sum([_ for _ in self.extras.values()]),
                        'dist/z_lift': self.extras['z_lift'],
                        'dist/xy_move': self.extras['xy_move']
                        }, step=self.total_steps, commit=False)
 
-        if 0 in env_ids:
-            self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, 'angle_reward': 0}
+        if 0 in env_ids and self.total_steps > 0:
+            reward_items = ['dist_reward', 'pose_reward', 'lego_up_reward', 'action_penalty', 'angle_reward', 'emergency_reward']
+            for item in reward_items:
+                self.extras[item] = self.extras[item].to('cpu').numpy()
+            total_reward = sum([abs(self.extras[item]) for item in reward_items])
+            print("\n")
+            print("#" * 17, " Statistics", "#" * 17)
+            print(f"dist_reward:      {self.extras['dist_reward']:.2f} ({(abs(self.extras['dist_reward']) / total_reward * 100):.2f}%)")
+            print(f"angle_reward:     {self.extras['angle_reward']:.2f} ({(abs(self.extras['angle_reward']) / total_reward * 100):.2f}%)")
+            print(f"pose_reward:      {self.extras['pose_reward']:.2f} ({(abs(self.extras['pose_reward']) / total_reward * 100):.2f}%)")
+            print(f"emergency_reward: {self.extras['emergency_reward']:.2f} ({(abs(self.extras['emergency_reward']) / total_reward * 100):.2f}%)")
+            print(f"lego_up_reward:   {self.extras['lego_up_reward']:.2f} ({(abs(self.extras['lego_up_reward']) / total_reward * 100):.2f}%)")
+            print(f"action_penalty:   {self.extras['action_penalty']:.2f} ({(abs(self.extras['action_penalty']) / total_reward * 100):.2f}%)")
+            print("#" * 15, "Statistics End", "#" * 15,"\n")
+
+            self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, 'angle_reward': 0, 'emergency_reward': 0}
         
         self.progress_buf[env_ids] = 0
         self.reset_buf[env_ids] = 0
@@ -801,17 +923,31 @@ class InspireSearchBlock(BaseTask):
     
     def post_reset(self, env_ids, hand_indices):
         self.gym.clear_lines(self.viewer)
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
-        
         # step physics and render each frame
-        for _ in range(80):
+        for _ in range(60):
             self.render()
             self.gym.simulate(self.sim)
         
-        # self.render_for_camera()
         self.gym.fetch_results(self.sim, True)
+        if self.enable_camera_sensors:
+            self.render_for_camera()
+            self.gym.refresh_dof_state_tensor(self.sim)
+            self.gym.refresh_actor_root_state_tensor(self.sim)
+            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            self.gym.refresh_jacobian_tensors(self.sim)
+            self.gym.render_all_camera_sensors(self.sim)
+            self.gym.start_access_image_tensors(self.sim)
 
-        # need to check if the blew code is necessary
+            camera_rgba_image = camera_rgb_visulization(self.camera_tensors, env_id=0, is_depth_image=False)
+            camera_seg_image = camera_segmentation_visulization(self.segmentation_id_list, self.camera_tensors, self.camera_seg_tensors, env_id=0, is_depth_image=False)
+            self.compute_emergence_reward(self.camera_tensors, self.camera_seg_tensors, segmentation_id_list=self.segmentation_id_list)
+            cv2.namedWindow("DEBUG_RGB_VIS", 0)
+            cv2.namedWindow("DEBUG_SEG_VIS", 0)
+            cv2.imshow("DEBUG_RGB_VIS", camera_rgba_image)
+            cv2.imshow("DEBUG_SEG_VIS", camera_seg_image)
+            cv2.waitKey(1)
+            self.gym.end_access_image_tensors(self.sim)
+
         self.arm_hand_dof_pos[env_ids, :self.num_arm_hand_dofs] = self.arm_hand_prepare_dof_pos
         self.prev_targets[env_ids, :self.num_arm_hand_dofs] = self.arm_hand_prepare_dof_pos
         self.cur_targets[env_ids, :self.num_arm_hand_dofs] = self.arm_hand_prepare_dof_pos
@@ -822,12 +958,7 @@ class InspireSearchBlock(BaseTask):
         self.seg_start_pos[env_ids] = self.root_state_tensor[self.seg_indices[env_ids], 0:3].clone()
         self.seg_start_rot[env_ids] = self.root_state_tensor[self.seg_indices[env_ids], 3:7].clone()
         
-        # self.add_debug_lines(self.envs[0], middle_pos[0], self.finger_thumb_rot[0])
-        self.add_debug_lines(self.envs[0], self.seg_pos[0], self.seg_rot[0])
-        # draw_point(self.gym, self.viewer, self.envs[0], self.seg_pos[0], self.lego_rot[0], color=(1, 0, 0), radius=0.015)
-        # draw_point(self.gym, self.viewer, self.envs[0], self.middle_point[0], self.finger_thumb_rot[0], color=(1, 0, 0), radius=0.016)
-        # draw_point(self.gym, self.viewer, self.envs[0], ik_point[0], self.hand_base_rot[0], color=(0, 0, 1), radius=0.02)
-        
+        print("Post Reset finish!!")
                
     def pre_physics_step(self, actions):
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
@@ -891,8 +1022,16 @@ class InspireSearchBlock(BaseTask):
             self.total_resets = self.total_resets + self.reset_buf.sum()
             direct_average_successes = self.total_successes + self.successes.sum()
             self.total_successes = self.total_successes + (self.successes * self.reset_buf).sum()
-       
-    
+        
+        self.gym.clear_lines(self.viewer)
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        # self.add_debug_lines(self.envs[0], middle_pos[0], self.finger_thumb_rot[0])
+        self.add_debug_lines(self.envs[0], self.seg_pos[0], self.seg_rot[0])
+        draw_point(self.gym, self.viewer, self.envs[0], self.seg_pos[0], self.seg_rot[0], color=(1, 0, 0), radius=0.03)
+        # draw_point(self.gym, self.viewer, self.envs[0], self.seg_pos[0], self.lego_rot[0], color=(1, 0, 0), radius=0.015)
+        # draw_point(self.gym, self.viewer, self.envs[0], self.middle_point[0], self.finger_thumb_rot[0], color=(1, 0, 0), radius=0.016)
+        # draw_point(self.gym, self.viewer, self.envs[0], ik_point[0], self.hand_base_rot[0], color=(0, 0, 1), radius=0.02)
+         
     def add_debug_lines(self, env, pos, rot):
         posx = (pos + quat_apply(rot, to_torch([1, 0, 0], device=self.device) * 0.2)).cpu().numpy()
         posy = (pos + quat_apply(rot, to_torch([0, 1, 0], device=self.device) * 0.2)).cpu().numpy()
@@ -903,7 +1042,12 @@ class InspireSearchBlock(BaseTask):
         self.gym.add_lines(self.viewer, env, 1, [p0[0], p0[1], p0[2], posy[0], posy[1], posy[2]], [0.1, 0.85, 0.1])
         self.gym.add_lines(self.viewer, env, 1, [p0[0], p0[1], p0[2], posz[0], posz[1], posz[2]], [0.1, 0.1, 0.85])
 
-
+# pre_physics_step
+# reset_envs
+# post_reset
+# post_physics_step
+# compute_observation
+# compute_reward
 ###########################################################
 ##############  inner function tools ####################
 ###########################################################
@@ -996,6 +1140,22 @@ def draw_point(gym, viewer, env, center, rotation, ax="xyz", radius=0.02, num_se
             end = points[i + 1]
             gym.add_lines(viewer, env, 1, [*start, *end], color)
 
+def camera_rgb_visulization(camera_tensors, env_id=0, is_depth_image=False):
+        torch_rgba_tensor = camera_tensors[env_id].clone()
+        camera_image = torch_rgba_tensor.cpu().numpy()
+        camera_image = cv2.cvtColor(camera_image, cv2.COLOR_BGR2RGB)
+        
+        return camera_image
+
+def camera_segmentation_visulization(segmentation_id_list, camera_tensors, camera_seg_tensors, segmentation_id=0, env_id=0, is_depth_image=False):
+    torch_rgba_tensor = camera_tensors[env_id].clone()
+    torch_seg_tensor = camera_seg_tensors[env_id].clone()
+    torch_rgba_tensor[torch_seg_tensor != segmentation_id_list[env_id]] = 0
+
+    camera_image = torch_rgba_tensor.cpu().numpy()
+    camera_image = cv2.cvtColor(camera_image, cv2.COLOR_BGR2RGB)
+
+    return camera_image
 
 _DEFAULT_VALUE_AT_MARGIN = 0.1
 
