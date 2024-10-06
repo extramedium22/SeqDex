@@ -7,9 +7,13 @@ env:
   episodeLength: 210
   handResetStep: 10
   enableDebugVis: False
+  enable_wandb: True
   enable_camera_sensors: True
-  enable_wandb: False
+  enable_lego_curriculum: True
+  legoCurriculumInterval: 300
   aggregateMode: 1
+  num_lego_suit: 4
+  num_max_suit: 9
 
   stiffnessScale: 1.0
   forceLimitScale: 1.0

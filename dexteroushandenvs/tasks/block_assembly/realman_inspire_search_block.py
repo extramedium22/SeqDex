@@ -1,28 +1,20 @@
 import numpy as np
 import os
 
-from isaacgym import gymtorch
+from dexteroushandenvs.tasks.hand_base.base_task import BaseTask
 from isaacgym import gymapi, gymutil
 from isaacgym.torch_utils import *
-from dexteroushandenvs.tasks.hand_base.base_task import BaseTask
-from dexteroushandenvs.tasks.hand_base.vec_task import VecTask, VecTaskCPU, VecTaskGPU, VecTaskPython, VecTaskPythonArm
+from isaacgym import gymtorch
 import torch
 import random
-
-from torch import nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.autograd import Variable
-
+from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 from PIL import Image as Im
+import time, datetime
+from collections import deque
 import cv2
 import math
-from scipy.spatial.transform import Rotation as R
-
-from einops import rearrange
 import pickle
-import time, datetime
 import wandb
 import warnings
 
@@ -34,8 +26,6 @@ class InspireSearchBlock(BaseTask):
         
         self.num_realman_dofs = 7
         self.num_inspire_dofs = 12
-        self.num_lego_suit = 5
-        self.num_lego_block = self.num_lego_suit*8 + 10*6
         self.actuated_dof_names = ["R_thumb_MCP_joint1", "R_thumb_MCP_joint2", "R_index_MCP_joint", "R_middle_MCP_joint", "R_ring_MCP_joint", "R_pinky_MCP_joint"]
         self.actuated_dof_indices = [7, 8, 11, 13, 15, 17]
         
@@ -48,9 +38,15 @@ class InspireSearchBlock(BaseTask):
         self.hand_reset_step = self.cfg["env"]["handResetStep"]
         self.print_success_stat = self.cfg["env"]["printNumSuccesses"]
         self.max_consecutive_successes = self.cfg["env"]["maxConsecutiveSuccesses"]
+        self.lego_curriculum_interval = self.cfg["env"]["legoCurriculumInterval"]
         self.enable_camera_sensors = self.cfg["env"]["enable_camera_sensors"]
+        self.enable_lego_curriculum = self.cfg["env"]["enable_lego_curriculum"]
         self.enable_wandb = self.cfg["env"]["enable_wandb"]
-        # Check
+        self.num_lego_suit = self.cfg["env"]["num_lego_suit"]
+        self.num_max_suit = self.cfg["env"]["num_max_suit"]
+        self.num_max_suit = self.num_max_suit if self.enable_lego_curriculum else self.num_lego_suit
+        self.num_lego_block = self.num_max_suit*8 + 10*6
+        # check
         self.cfg["env"]["numObservations"] = 175 - 24
         self.cfg["env"]["numStates"] = 175 - 24
         self.cfg["env"]["numActions"] = 19
@@ -59,9 +55,8 @@ class InspireSearchBlock(BaseTask):
         self.cfg["headless"] = headless
         self.up_axis = 'z'
         self.vel_obs_scale = 0.2
+        self.hidden_height = 200
         self.record_completion_time = False
-        
-        
         # setup parameters above
         
         super().__init__(cfg=self.cfg, enable_camera_sensors=self.enable_camera_sensors)
@@ -125,7 +120,7 @@ class InspireSearchBlock(BaseTask):
         self.seg_pos = self.root_state_tensor[self.seg_indices, 0:3].clone()
         self.seg_rot = self.root_state_tensor[self.seg_indices, 3:7].clone()
         self.base_pos = self.rigid_body_states[:, 0, 0:3].clone()
-        
+        self.episodes = 0
         self.total_successes = 0
         self.total_resets = 0
         self.total_steps = 0
@@ -139,15 +134,14 @@ class InspireSearchBlock(BaseTask):
         print("hand_base_rigid_body_index: ", self.hand_base_rigid_body_index)
         
         self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, "angle_reward": 0, "emergency_reward": 0,
-                       'z_lift': 0, 'xy_move': 0}
-        
-        self.max_pixel_value = -np.inf
+                       'z_lift': 0, 'xy_move': 0, 'success_length': self.max_episode_length}
+        self.ema_success = deque(maxlen=10)
         self._init_wandb()
     
     def _init_wandb(self):
         project = "DexterousHand"
         group = self.cfg["env"]["env_name"]
-        name = datetime.datetime.strftime(datetime.datetime.now(), '%m%d_%H%M%S')
+        name = datetime.datetime.strftime(datetime.datetime.now(), '%m%d') + f"_Search"
         monitor_config = flatten_dict(self.cfg)
         if self.enable_wandb:
             wandb.init(project=project, 
@@ -303,7 +297,7 @@ class InspireSearchBlock(BaseTask):
         self.segmentation_id = 1
 
         # lego in box
-        for iter_n in range(self.num_lego_suit):
+        for iter_n in range(self.num_max_suit):
             for idx, lego_file_name in enumerate(lego_files):
                 lego_asset = create_lego_asset(self.sim, self.gym, asset_root, lego_path, lego_file_name, fix_base_link=None)
                 x_offset = 0.17 * (idx % 3)
@@ -316,7 +310,7 @@ class InspireSearchBlock(BaseTask):
                 else:
                     x_pos = 0.17 - x_offset + 0.25
                     y_pos = 0.11 - y_offset + 0.19
-                
+                if iter_n >= self.num_lego_suit: z_height += self.hidden_height
                 lego_start_pose = create_lego_pose(x_pos, y_pos, z_height, 0.0, 0.0, 0.785)
                 lego_assets.append(lego_asset)
                 lego_start_poses.append(lego_start_pose)
@@ -722,7 +716,7 @@ class InspireSearchBlock(BaseTask):
             torch_seg_tensor = camera_seg_tensors[i]
             self.emergence_pixel[i] = torch_seg_tensor[torch_seg_tensor == segmentation_id_list[i]].shape[0]
         self.emergence_reward = (self.emergence_pixel - self.last_emergence_pixel) / 100
-        print("emergence_reward: ", self.emergence_reward[0])
+        # print("emergence_reward: ", self.emergence_reward[0])
         self.last_emergence_pixel = self.emergence_pixel.clone()
     
     def compute_reward(self):
@@ -769,6 +763,9 @@ class InspireSearchBlock(BaseTask):
         self.extras['emergency_reward'] += emergency_reward[0]
         self.extras['z_lift'] = z_lift[0]
         self.extras['xy_move'] = xy_move[0]
+        self.extras['success'] = 100.0 if self.seg_pos[0, 2] > self.seg_start_pos[0, 2] + 0.9*target_lift_height else 0.0
+        if self.extras['success'] > 0 and self.extras['success_length'] == self.max_episode_length:
+            self.extras['success_length'] = self.progress_buf[0]
 
         self.E_prev = distance_reward + pose_reward + lift_reward + angle_reward + emergency_reward
         
@@ -777,6 +774,12 @@ class InspireSearchBlock(BaseTask):
         self.rew_buf[:], self.reset_buf[:] = total_reward, resets
         
     def reset_envs(self, env_ids):
+        if self.enable_lego_curriculum and self.episodes % self.lego_curriculum_interval == 0 and self.episodes > 0 and self.num_lego_suit < self.num_max_suit:
+            print("Increase the lego blocks, current lego suit: ", (self.num_lego_suit+1)*8)
+            self.lego_start_states[:, self.num_lego_suit*8: (self.num_lego_suit+1)*8, 2] -= self.hidden_height
+            self.gym.refresh_actor_root_state_tensor(self.sim)
+            self.num_lego_suit += 1
+        
         # record the trajectory
         if self.record_completion_time:
             self.end_time = time.time()
@@ -888,24 +891,15 @@ class InspireSearchBlock(BaseTask):
         self.E_prev[env_ids] = to_torch([0.0], device=self.device).repeat(len(env_ids))
         
         self.post_reset(env_ids, hand_indices)
-        if self.enable_wandb:
-            wandb.log({'reward/dist_reward': self.extras['dist_reward'],
-                       "reward/pose_reward": self.extras['pose_reward'],
-                       'reward/lego_up_reward': self.extras['lego_up_reward'], 
-                       'reward/action_penalty': self.extras['action_penalty'],
-                       'reward/angle_reward': self.extras['angle_reward'],
-                       'reward/emergency_reward': self.extras['emergency_reward'],
-                       'reward/total_reward': sum([_ for _ in self.extras.values()]),
-                       'dist/z_lift': self.extras['z_lift'],
-                       'dist/xy_move': self.extras['xy_move']
-                       }, step=self.total_steps, commit=False)
 
         if 0 in env_ids and self.total_steps > 0:
+            self.ema_success.append(self.extras['success'])
             reward_items = ['dist_reward', 'pose_reward', 'lego_up_reward', 'action_penalty', 'angle_reward', 'emergency_reward']
             for item in reward_items:
                 self.extras[item] = self.extras[item].to('cpu').numpy()
             total_reward = sum([abs(self.extras[item]) for item in reward_items])
             print("\n")
+            print("Current lego blocks: ", self.num_lego_suit*8)
             print("#" * 17, " Statistics", "#" * 17)
             print(f"dist_reward:      {self.extras['dist_reward']:.2f} ({(abs(self.extras['dist_reward']) / total_reward * 100):.2f}%)")
             print(f"angle_reward:     {self.extras['angle_reward']:.2f} ({(abs(self.extras['angle_reward']) / total_reward * 100):.2f}%)")
@@ -913,14 +907,31 @@ class InspireSearchBlock(BaseTask):
             print(f"emergency_reward: {self.extras['emergency_reward']:.2f} ({(abs(self.extras['emergency_reward']) / total_reward * 100):.2f}%)")
             print(f"lego_up_reward:   {self.extras['lego_up_reward']:.2f} ({(abs(self.extras['lego_up_reward']) / total_reward * 100):.2f}%)")
             print(f"action_penalty:   {self.extras['action_penalty']:.2f} ({(abs(self.extras['action_penalty']) / total_reward * 100):.2f}%)")
+            print(f"EMA Success rate: {np.mean(self.ema_success):.2f}%")
+            print(f"Success length:   {self.extras['success_length']}")
             print("#" * 15, "Statistics End", "#" * 15,"\n")
-
-            self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, 'angle_reward': 0, 'emergency_reward': 0}
+            
+            # upload wandb
+            if self.enable_wandb:
+                wandb.log({'reward/dist_reward': self.extras['dist_reward'],
+                        "reward/pose_reward": self.extras['pose_reward'],
+                        'reward/lego_up_reward': self.extras['lego_up_reward'], 
+                        'reward/action_penalty': self.extras['action_penalty'],
+                        'reward/angle_reward': self.extras['angle_reward'],
+                        'reward/emergency_reward': self.extras['emergency_reward'],
+                        'dist/z_lift': self.extras['z_lift'],
+                        'dist/xy_move': self.extras['xy_move'],
+                        'stats/total_reward': sum([_ for _ in self.extras.values()]),
+                        'stats/success_rate': np.mean(self.ema_success),
+                        'stats/success_length': self.extras['success_length'],
+                        }, step=self.total_steps, commit=False)
+            
+            self.extras = {'dist_reward': 0, 'action_penalty': 0, 'lego_up_reward': 0, "pose_reward": 0, 'angle_reward': 0, 'emergency_reward': 0, 'success_length': self.max_episode_length}
         
         self.progress_buf[env_ids] = 0
-        self.reset_buf[env_ids] = 0
-        # self.successes[env_ids] = 0
-    
+        self.reset_buf[env_ids] = 0 
+        self.episodes += 1
+              
     def post_reset(self, env_ids, hand_indices):
         self.gym.clear_lines(self.viewer)
         # step physics and render each frame
