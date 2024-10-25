@@ -142,6 +142,6 @@ dexteroushandenvs/intermediate_state
 
 .idea
 .vscode
-assets
+# assets
 dexteroushandenvs/wandb
 *checkpoint

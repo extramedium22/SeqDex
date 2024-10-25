@@ -261,10 +261,14 @@ class InspireGraspBlockV2(BaseTask):
         # =================== the block End =================== #
         
         # =================== Camera Props settings =================== #
-        camera_props = gymapi.CameraProperties()
-        camera_props.width = 128
-        camera_props.height = 128
-        camera_props.enable_tensors = True
+        self.camera_tensors = []
+        self.camera_depth_tensors = []
+
+        #camera_props = gymapi.CameraProperties()
+        #camera_props.width = 128
+        #camera_props.height = 128
+        #camera_props.enable_tensors = True
+        
         # =================== Camera Props settings End =================== #
         
         self.hand_start_states = []
@@ -320,8 +324,29 @@ class InspireGraspBlockV2(BaseTask):
             self.gym.set_rigid_body_color(env_ptr, lego_actor, 0, gymapi.MESH_VISUAL, gymapi.Vec3(color[0], color[1], color[2]))
             
             # Camera Sensor
-            camera_handle = self.gym.create_camera_sensor(env_ptr, camera_props)
-            self.gym.set_camera_location(camera_handle, env_ptr, gymapi.Vec3(0.0,0.0,1.5), gymapi.Vec3(0.0,0.0,0.0))
+            self.camera_props = gymapi.CameraProperties()
+            self.camera_props.width = 128
+            self.camera_props.height = 128
+            self.camera_props.enable_tensors = True
+            self.env_origin = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
+            # self.camera_u = torch.arange(0, self.camera_props.width, device=self.device)
+            # self.camera_v = torch.arange(0, self.camera_props.height, device=self.device)
+            # self.camera_v2, self.camera_u2 = torch.meshgrid(self.camera_v, self.camera_u, indexing='ij')
+
+            #self.camera_offset_quat = gymapi.Quat().from_euler_zyx(0, - 3.141 + 0.5, 1.571)
+            #self.camera_offset_quat = to_torch([self.camera_offset_quat.x, self.camera_offset_quat.y, self.camera_offset_quat.z, self.camera_offset_quat.w], device=self.device)
+            #self.camera_offset_pos = to_torch([0.03, 0.107 - 0.098, 0.067 + 0.107], device=self.device)
+            
+            camera_handle = self.gym.create_camera_sensor(env_ptr, self.camera_props)
+            #self.gym.set_camera_location(camera_handle, env_ptr, gymapi.Vec3(0.0,0.0,3.0), gymapi.Vec3(0.0,0.0,0.0))
+            self.gym.set_camera_location(camera_handle, env_ptr, gymapi.Vec3(0.35, 0.19, 1.0), gymapi.Vec3(0.2, 0.19, 0))
+
+            camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_ptr, camera_handle, gymapi.IMAGE_COLOR)
+            torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor)
+            self.camera_tensors.append(torch_cam_tensor)
+            camera_depth_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_ptr, camera_handle, gymapi.IMAGE_DEPTH)
+            torch_cam_depth_tensor = gymtorch.wrap_tensor(camera_depth_tensor)
+            self.camera_depth_tensors.append(torch_cam_depth_tensor)
 
 
             self.envs.append(env_ptr)
@@ -391,6 +416,30 @@ class InspireGraspBlockV2(BaseTask):
         self.finger_ring_pos  += quat_apply(self.finger_ring_rot[:], to_torch([0.2, 0.9, 0.1],  device=self.device).repeat(self.num_envs, 1) * 0.04)
         self.finger_pinky_pos += quat_apply(self.finger_pinky_rot[:], to_torch([0.2, 0.8, 0.1], device=self.device).repeat(self.num_envs, 1) * 0.04)
         
+        # here show the camera
+        self.render()
+        self.gym.simulate(self.sim)
+
+        self.render_for_camera()
+        #self.gym.fetch_results(self.sim, True)
+        #self.gym.refresh_dof_state_tensor(self.sim)
+        #self.gym.refresh_actor_root_state_tensor(self.sim)
+        #self.gym.refresh_rigid_body_state_tensor(self.sim)
+        #self.gym.refresh_jacobian_tensors(self.sim)
+        self.gym.render_all_camera_sensors(self.sim)
+        self.gym.start_access_image_tensors(self.sim)
+
+        camera_rgba_image = camera_rgb_visulization(self.camera_tensors, env_id=0, is_depth_image=False)
+        camera_depth_image = camera_depth_visulization(self.camera_depth_tensors, env_id=0, is_depth_image=True)
+        
+        cv2.namedWindow("DEBUG_RGB_VIS", 0)
+        cv2.namedWindow("DEBUG_DEP_VIS", 0)
+
+        cv2.imshow("DEBUG_RGB_VIS", camera_rgba_image)
+        cv2.imshow("DEBUG_DEP_VIS", camera_depth_image)
+        cv2.waitKey(1)
+
+
         # add ball to visualize the finger tip
         self.compute_contact_asymmetric_observations()
     
@@ -1046,3 +1095,24 @@ def compute_angle_line_plane(p1, p2, plane_normal):
     angle_line_plane = torch.pi / 2 - angle_with_normal  # (batch)
     
     return angle_line_plane
+
+
+def camera_rgb_visulization(camera_tensors, env_id=0, is_depth_image=False):
+        torch_rgba_tensor = camera_tensors[env_id].clone()
+        camera_image = torch_rgba_tensor.cpu().numpy()
+        camera_image = cv2.cvtColor(camera_image, cv2.COLOR_BGR2RGB)
+        
+        return camera_image
+
+def camera_depth_visulization(camera_depth_tensors, env_id=0, is_depth_image=True):
+        torch_depth_tensor = camera_depth_tensors[env_id].clone()
+        camera_image = torch_depth_tensor.cpu().numpy()
+        camera_image = camera_image * -1
+        #print(camera_image)
+        #print(camera_image.max())
+        #camera_image = cv2.cvtColor(camera_image, cv2.COLOR_BGR2RGB)
+        camera_image = cv2.convertScaleAbs(camera_image, alpha=255.0 / camera_image.max())
+        camera_image = 255 - camera_image
+        #print(camera_image)
+        
+        return camera_image
