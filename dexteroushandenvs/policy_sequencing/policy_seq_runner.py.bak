@@ -146,15 +146,13 @@ class PolicySequencingRunner():
 
     def rl_games_save_agent_checkpoint(self, agent, checkpoint_name, mean_rewards, epoch_num):
         if agent.save_freq > 0:
-            #if (epoch_num % agent.save_freq == 0) and (mean_rewards[0] <= agent.last_mean_rewards):
-            if (epoch_num % agent.save_freq == 0):
+            if (epoch_num % agent.save_freq == 0) and (mean_rewards[0] <= agent.last_mean_rewards):
                 agent.save(os.path.join(agent.nn_dir, 'last_' + checkpoint_name))
 
         if mean_rewards[0] > agent.last_mean_rewards and epoch_num >= agent.save_best_after:
             print('saving next best rewards: ', mean_rewards)
             agent.last_mean_rewards = mean_rewards[0]
-            #agent.save(os.path.join(agent.nn_dir, agent.config['name']))
-            agent.save(os.path.join(agent.nn_dir, 'best_' + checkpoint_name))
+            agent.save(os.path.join(agent.nn_dir, agent.config['name']))
 
             if 'score_to_win' in agent.config:
                 if agent.last_mean_rewards > agent.config['score_to_win']:

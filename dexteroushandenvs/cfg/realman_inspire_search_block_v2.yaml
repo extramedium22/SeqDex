@@ -3,7 +3,7 @@ env:
   env_name: "realman_inspire_search_block"
   project: "DexterousHand"
   numEnvs: 1
-  envSpacing: 1.25
+  envSpacing: 2.5
   episodeLength: 210
   handResetStep: 10
   enableDebugVis: False

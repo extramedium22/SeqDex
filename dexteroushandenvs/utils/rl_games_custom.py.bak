@@ -1277,7 +1277,6 @@ class A2CControllerAgent(A2CAgent):
                     task_name = self.config['name'].split("_")[0]
 
                     if self.save_freq > 0:
-                        print('save_freq=' + str(self.save_freq))
                         if (epoch_num % self.save_freq == 0) and (mean_rewards <= self.last_mean_rewards):
                             self.save(f"{self.logdir}/{task_name}/nn/" + 'last_' + self.config['name'] + 'ep=' + str(
                                 epoch_num) + 'rew=' + str(mean_rewards))
@@ -1285,9 +1284,7 @@ class A2CControllerAgent(A2CAgent):
                     if mean_rewards[0] > self.last_mean_rewards and epoch_num >= self.save_best_after:
                         print('saving next best rewards: ', mean_rewards)
                         self.last_mean_rewards = mean_rewards[0]
-                        #self.save(f"{self.logdir}/{task_name}/nn/" + self.config['name'])
-                        self.save(f"{self.logdir}/{task_name}/nn/" + self.config['name'] + '_best_'+ 'ep=' + str(
-                                epoch_num) + 'rew=' + str(mean_rewards))
+                        self.save(f"{self.logdir}/{task_name}/nn/" + self.config['name'])
                         if self.last_mean_rewards > self.config['score_to_win']:
                             print('Network won!')
                             self.save(
