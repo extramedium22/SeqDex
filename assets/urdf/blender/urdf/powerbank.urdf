@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<robot name="powerbank">
+  <link name="powerbank">
+    <visual>
+      <origin xyz="0.0 0.0 0.0" rpy="1.5708 0.0 0.0"/>
+      <geometry>
+        <mesh filename="powerbank.obj" scale="0.07 0.07 0.07"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0 0.0" rpy="1.5708 0.0 0.0"/>
+      <geometry>
+        <mesh filename="powerbank.obj" scale="0.07 0.07 0.07"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.8"/>
+      <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0001" iyz="0.0" izz="0.0001"/>
+    </inertial>
+  </link>
+</robot>

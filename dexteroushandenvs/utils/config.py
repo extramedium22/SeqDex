@@ -82,6 +82,8 @@ def retrieve_cfg(args, use_rlg_config=False):
         return os.path.join(args.logdir, "realman_inspire_grasp_block/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/realman_inspire_grasp_block.yaml"
     elif args.task == "InspireGraspBlockV2":
         return os.path.join(args.logdir, "realman_inspire_grasp_block_v2/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/realman_inspire_grasp_block_v2.yaml"
+    elif args.task == "InspireGraspBlockV3":
+        return os.path.join(args.logdir, "realman_inspire_grasp_block_v2/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/realman_inspire_grasp_block_v3.yaml"
     elif args.task == "InspireSearchBlock":
         return os.path.join(args.logdir, "realman_inspire_search_block/{}/{}".format(args.algo, args.algo)), "cfg/{}/config.yaml".format(args.algo), "cfg/realman_inspire_search_block.yaml"
     elif args.task == "InspireSearchBlockV2":

@@ -176,7 +176,8 @@ class InspireGraspBlockV2(BaseTask):
             asset_root = self.cfg["env"]["asset"].get("assetRoot", asset_root)
         
         # =================== Set up the arm hand =================== #
-        arm_hand_asset_file = "mjcf/realman_mjcf/realman_inspire_mjmodel.xml"
+        # arm_hand_asset_file = "mjcf/realman_mjcf/realman_inspire_mjmodel.xml"
+        arm_hand_asset_file = "mjcf/realman_gen72/gen72_inspire.xml"
         asset_options = gymapi.AssetOptions()
         asset_options.flip_visual_attachments = False
         asset_options.collapse_fixed_joints = True
@@ -262,7 +263,7 @@ class InspireGraspBlockV2(BaseTask):
         
         # =================== Camera Props settings =================== #
         self.camera_tensors = []
-        #self.camera_depth_tensors = []
+        self.camera_depth_tensors = []
 
         #camera_props = gymapi.CameraProperties()
         #camera_props.width = 128
@@ -325,8 +326,8 @@ class InspireGraspBlockV2(BaseTask):
             
             # Camera Sensor
             self.camera_props = gymapi.CameraProperties()
-            self.camera_props.width = 128
-            self.camera_props.height = 128
+            self.camera_props.width = 512
+            self.camera_props.height = 512
             self.camera_props.enable_tensors = True
             self.env_origin = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
             # self.camera_u = torch.arange(0, self.camera_props.width, device=self.device)
@@ -346,9 +347,9 @@ class InspireGraspBlockV2(BaseTask):
             camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_ptr, camera_handle, gymapi.IMAGE_COLOR)
             torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor)
             self.camera_tensors.append(torch_cam_tensor)
-            #camera_depth_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_ptr, camera_handle, gymapi.IMAGE_DEPTH)
-            #torch_cam_depth_tensor = gymtorch.wrap_tensor(camera_depth_tensor)
-            #self.camera_depth_tensors.append(torch_cam_depth_tensor)
+            camera_depth_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_ptr, camera_handle, gymapi.IMAGE_DEPTH)
+            torch_cam_depth_tensor = gymtorch.wrap_tensor(camera_depth_tensor)
+            self.camera_depth_tensors.append(torch_cam_depth_tensor)
 
 
             self.envs.append(env_ptr)
@@ -434,13 +435,13 @@ class InspireGraspBlockV2(BaseTask):
         print(self.camera_tensors[0].size())
 
         camera_rgba_image = camera_rgb_visulization(self.camera_tensors, env_id=0, is_depth_image=False)
-        #camera_depth_image = camera_depth_visulization(self.camera_depth_tensors, env_id=0, is_depth_image=True)
+        camera_depth_image = camera_depth_visulization(self.camera_depth_tensors, env_id=0, is_depth_image=True)
         
         cv2.namedWindow("DEBUG_RGB_VIS", 0)
-        #cv2.namedWindow("DEBUG_DEP_VIS", 0)
+        cv2.namedWindow("DEBUG_DEP_VIS", 0)
 
         cv2.imshow("DEBUG_RGB_VIS", camera_rgba_image)
-       # cv2.imshow("DEBUG_DEP_VIS", camera_depth_image)
+        cv2.imshow("DEBUG_DEP_VIS", camera_depth_image)
         cv2.waitKey(1)
 
 
@@ -1110,6 +1111,8 @@ def camera_rgb_visulization(camera_tensors, env_id=0, is_depth_image=False):
 
 def camera_depth_visulization(camera_depth_tensors, env_id=0, is_depth_image=True):
         torch_depth_tensor = camera_depth_tensors[env_id].clone()
+        torch_depth_tensor = torch.clamp(torch_depth_tensor, -1.0, 1.0)
+        print(torch_depth_tensor)
         camera_image = torch_depth_tensor.cpu().numpy()
         camera_image = camera_image * -1
         #print(camera_image)
